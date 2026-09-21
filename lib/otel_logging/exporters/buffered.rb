@@ -1,0 +1,291 @@
+# frozen_string_literal: true
+
+require_relative 'formatting'
+
+module OtelLogging
+  module Exporters
+    # SpanProcessor that buffers spans and outputs a complete tree when the trace finishes.
+    #
+    # Spans arrive at on_finish in completion order (deepest children first).
+    # We buffer them and reconstruct the tree when the root span finishes.
+    #
+    # Options:
+    #   only_on_error: If true, only output the tree when the trace has an error
+    #
+    # This gives us:
+    #   - Accurate durations (spans are complete)
+    #   - Proper └ for last siblings (we know the full tree structure)
+    #   - Error propagation visible (parent spans have error status)
+    class Buffered < OpenTelemetry::SDK::Trace::SpanProcessor
+      include Formatting
+
+      TRACE_TTL_SECONDS = 300 # Clean up orphaned traces after 5 minutes
+      MAX_BUFFERED_TRACES = 1000 # Maximum traces to buffer before forced cleanup
+
+      def initialize(logger, only_on_error: false)
+        raise ArgumentError, 'logger is required' if logger.nil?
+
+        @logger = logger
+        @only_on_error = only_on_error
+        @traces = {}  # trace_id => { spans: [], root: nil, started_at: Time }
+        @mutex = Mutex.new
+        @last_cleanup = Time.now
+      end
+
+      # Called when span starts - buffered mode does nothing here
+      def on_start(span, parent_context)
+        # Initialize trace buffer
+        trace_id = span.context.hex_trace_id
+        @mutex.synchronize do
+          cleanup_orphaned_traces if should_cleanup?
+          @traces[trace_id] ||= { spans: [], root: nil, started_at: Time.now }
+        end
+      end
+
+      # Called when span finishes - buffer the span
+      def on_finish(span)
+        trace_id = span.context.hex_trace_id
+        parent_id = span.parent_span_id.unpack1('H*')
+
+        @mutex.synchronize do
+          @traces[trace_id] ||= { spans: [], root: nil, started_at: Time.now }
+          @traces[trace_id][:spans] << span
+
+          # Check if this is the root span
+          if parent_id == INVALID_SPAN_ID
+            @traces[trace_id][:root] = span
+            output_trace(trace_id)
+            @traces.delete(trace_id)
+          end
+        end
+      end
+
+      def force_flush(timeout: nil)
+        @mutex.synchronize { cleanup_orphaned_traces }
+        OpenTelemetry::SDK::Trace::Export::SUCCESS
+      end
+
+      def shutdown(timeout: nil)
+        @mutex.synchronize { @traces.clear }
+        OpenTelemetry::SDK::Trace::Export::SUCCESS
+      end
+
+      private
+
+      def should_cleanup?
+        @traces.size > MAX_BUFFERED_TRACES || (Time.now - @last_cleanup) > 60
+      end
+
+      def cleanup_orphaned_traces
+        cutoff = Time.now - TRACE_TTL_SECONDS
+        @traces.delete_if { |_, data| data[:started_at] && data[:started_at] < cutoff }
+        @last_cleanup = Time.now
+      end
+
+      def output_trace(trace_id)
+        trace_data = @traces[trace_id]
+        return unless trace_data && trace_data[:root]
+
+        root = trace_data[:root]
+
+        # If only_on_error mode, skip output if no error
+        if @only_on_error
+          has_error = root.status&.code == OpenTelemetry::Trace::Status::ERROR
+          return unless has_error
+        end
+
+        spans = trace_data[:spans]
+
+        # Build tree structure
+        tree = build_tree(spans, root)
+
+        # Output trace header
+        @logger.info ""
+        @logger.info "#{c(:trace_label, 'trace')} #{c(:trace_id, trace_id[0..15])}"
+
+        # Output root span inline (no tree prefix - root is special)
+        output_root_node(tree)
+      end
+
+      def output_root_node(node)
+        span = node[:span]
+        children = node[:children]
+        events = span.events || []
+
+        # Combine events and child spans as "tree children"
+        tree_children = []
+        events.each { |e| tree_children << { type: :event, event: e } }
+        children.each { |child| tree_children << { type: :span, node: child } }
+
+        # Sort by timestamp
+        tree_children.sort_by! do |child|
+          if child[:type] == :event
+            child[:event].timestamp
+          else
+            child[:node][:span].start_timestamp
+          end
+        end
+
+        # Output root span line (no prefix)
+        duration_ms = ((span.end_timestamp - span.start_timestamp) / 1_000_000.0).round(2)
+        has_error = span.status&.code == OpenTelemetry::Trace::Status::ERROR
+        span_id_short = span.context.hex_span_id[0..7]
+
+        line = "#{c(:span_name, "#{SPAN_MARKER} #{span.name}")}"
+        line += " #{c(:span_id, span_id_short)}"
+        line += " #{c(:duration, "#{duration_ms}ms")}"
+        line += " #{c(:error_badge, 'ERROR')}" if has_error
+        @logger.info line
+
+        # Output root attributes (simple prefix: │ if has children, nothing otherwise)
+        if span.attributes&.any?
+          content_prefix = tree_children.any? ? '│ ' : '  '
+          output_attributes(span.attributes, content_prefix)
+        end
+
+        # Output tree children - they get [] for ancestor_continues (root doesn't count)
+        tree_children.each_with_index do |child, index|
+          child_is_last = (index == tree_children.length - 1)
+
+          if child[:type] == :event
+            output_event(child[:event], [], child_is_last)
+          else
+            output_node(child[:node], [], child_is_last)
+          end
+        end
+      end
+
+      def build_tree(spans, root)
+        # Index spans by their span_id
+        span_map = {}
+        spans.each do |span|
+          span_id = span.context.hex_span_id
+          span_map[span_id] = { span: span, children: [] }
+        end
+
+        # Build parent-child relationships
+        root_id = root.context.hex_span_id
+        spans.each do |span|
+          span_id = span.context.hex_span_id
+          parent_id = span.parent_span_id.unpack1('H*')
+
+          next if span_id == root_id
+          next if parent_id == INVALID_SPAN_ID
+
+          if span_map[parent_id]
+            span_map[parent_id][:children] << span_map[span_id]
+          end
+        end
+
+        # Sort children by start time
+        span_map.each_value do |node|
+          node[:children].sort_by! { |child| child[:span].start_timestamp }
+        end
+
+        span_map[root_id]
+      end
+
+      def output_node(node, ancestor_continues, is_last)
+        span = node[:span]
+        children = node[:children]
+        events = span.events || []
+
+        # Combine events and child spans as "tree children"
+        tree_children = []
+        events.each { |e| tree_children << { type: :event, event: e } }
+        children.each { |child| tree_children << { type: :span, node: child } }
+
+        # Sort by timestamp
+        tree_children.sort_by! do |child|
+          if child[:type] == :event
+            child[:event].timestamp
+          else
+            child[:node][:span].start_timestamp
+          end
+        end
+
+        has_children = tree_children.any?
+
+        # Output span line
+        prefix = build_branch_prefix(ancestor_continues, is_last)
+        duration_ms = ((span.end_timestamp - span.start_timestamp) / 1_000_000.0).round(2)
+        has_error = span.status&.code == OpenTelemetry::Trace::Status::ERROR
+        span_id_short = span.context.hex_span_id[0..7]
+
+        line = "#{c(:tree, prefix)}#{c(:span_name, "#{SPAN_MARKER} #{span.name}")}"
+        line += " #{c(:span_id, span_id_short)}"
+        line += " #{c(:duration, "#{duration_ms}ms")}"
+        line += " #{c(:error_badge, 'ERROR')}" if has_error
+        @logger.info line
+
+        # Output span attributes
+        content_prefix = build_content_prefix(ancestor_continues, is_last, has_children)
+        output_attributes(span.attributes, content_prefix) if span.attributes&.any?
+
+        # Output tree children
+        tree_children.each_with_index do |child, index|
+          child_is_last = (index == tree_children.length - 1)
+          child_ancestor_continues = ancestor_continues + [!is_last]
+
+          if child[:type] == :event
+            output_event(child[:event], child_ancestor_continues, child_is_last)
+          else
+            output_node(child[:node], child_ancestor_continues, child_is_last)
+          end
+        end
+      end
+
+      def output_event(event, ancestor_continues, is_last)
+        prefix = build_branch_prefix(ancestor_continues, is_last)
+        event_color = event_color_for(event.name)
+
+        line = "#{c(:tree, prefix)}#{c(event_color, "#{EVENT_MARKER} #{event.name}")}"
+        @logger.info line
+
+        # Event attributes - align under the event name (past the + marker)
+        if event.attributes&.any?
+          content_prefix = ''
+          ancestor_continues.each { |c| content_prefix += c ? '│ ' : '  ' }
+          content_prefix += is_last ? '    ' : '│   ' # 4 chars to skip past "└ + " or "├ + "
+          output_attributes(event.attributes, content_prefix)
+        end
+      end
+
+      def output_attributes(attributes, prefix)
+        return if attributes.nil? || attributes.empty?
+
+        attributes.each do |key, value|
+          formatted = format_value(value)
+          @logger.info "#{c(:tree, prefix)}#{c(:attribute_key, key)}#{c(:punctuation, ':')} #{c(:attribute_value, formatted)}"
+        end
+        @logger.info c(:tree, prefix)
+      end
+
+      def build_branch_prefix(ancestor_continues, is_last)
+        prefix = ''
+        ancestor_continues.each do |continues|
+          prefix += continues ? '│ ' : '  '
+        end
+        prefix += is_last ? '└ ' : '├ '
+        prefix
+      end
+
+      def build_content_prefix(ancestor_continues, is_last, has_children)
+        prefix = ''
+
+        # Draw continuation lines for ancestors
+        ancestor_continues.each do |continues|
+          prefix += continues ? '│ ' : '  '
+        end
+
+        # Current node's continuation (based on whether it has more siblings)
+        prefix += is_last ? '  ' : '│ '
+
+        # Add column for children - includes both child spans AND events
+        prefix += has_children ? '│ ' : '  '
+
+        prefix
+      end
+    end
+  end
+end
