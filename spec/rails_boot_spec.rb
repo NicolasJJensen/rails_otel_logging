@@ -6,7 +6,7 @@ require "json"
 require "rbconfig"
 
 RSpec.describe "automatic Rails integration" do
-  def run_probe(mode: "managed", rails_logs: "replace")
+  def run_probe(mode: "managed", rails_logs: "replace", environment: "test", colorize: false)
     source = <<~RUBY
       require "json"
       require "fileutils"
@@ -56,7 +56,7 @@ RSpec.describe "automatic Rails integration" do
       File.write(File.join(APP_ROOT, "config/initializers/rails_otel_logging.rb"), <<~CONFIG)
         OtelLogging.configure do |config|
           config.output_mode = :delayed
-          config.colorize = false
+          #{"config.colorize = #{colorize.inspect}" unless colorize.nil?}
           config.service_name = "probe-service"
           config.service_version = "2026.09"
           #{case mode
@@ -160,10 +160,19 @@ RSpec.describe "automatic Rails integration" do
 
     RUBY
 
-    env = { "RAILS_ENV" => "test", "OTEL_RAILS_LOGS" => rails_logs, "OTEL_COLORIZE" => "false" }
+    env = { "RAILS_ENV" => environment, "OTEL_RAILS_LOGS" => rails_logs, "OTEL_COLORIZE" => nil, "NO_COLOR" => nil }
     output, error, status = Open3.capture3(env, RbConfig.ruby, "-I", File.expand_path("../lib", __dir__), "-e", source)
     expect(status.success?).to be(true), "#{output}\n#{error}"
     JSON.parse(output.lines.last)
+  end
+
+  %w[development production].each do |environment|
+    it "uses the color default for #{environment} during a real Rails boot" do
+      result = run_probe(environment: environment, colorize: nil)
+      event_line = result["logs"].lines.find { |line| line.include?("INFO outside.request") }
+      expect(event_line).not_to be_nil
+      expect(event_line.include?("\e[")).to eq(environment == "development")
+    end
   end
 
   it "boots from require alone with a managed provider and instruments Base and API controllers" do

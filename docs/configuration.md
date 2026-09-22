@@ -15,7 +15,7 @@ Defaults below assume no environment overrides.
 | `service_name` | `'rails_app'` | Service name on the managed provider's resource. |
 | `service_version` | `'1.0.0'` | Service version on the managed provider's resource. |
 | `tracer_provider` | `nil` | Use the managed Rails provider, or supply an SDK provider instance or lambda. |
-| `colorize` | `false` | Enable ANSI colors in output. |
+| `colorize` | `true` in Rails development; `false` otherwise | Enable ANSI colors in output. |
 | `theme` | `OtelLogging::Theme.new` | Customize colors and emphasis through the theme object. |
 | `enable_active_record` | `true` | Capture SQL notifications. |
 | `enable_action_controller` | `true` | Capture controller notifications. |
@@ -99,11 +99,11 @@ other value as false.
 | `OTEL_VIEW_PARTIALS` | `enable_partials` | `true` |
 | `OTEL_VIEW_PARAMS` | `include_params_in_views` | `true` |
 | `OTEL_VIEW_PARTIAL_DEPTH` | `partial_max_depth` | unset, meaning unlimited depth |
-| `OTEL_COLORIZE` | `colorize` | unset, meaning colors stay off |
+| `OTEL_COLORIZE` | `colorize` | Rails development: `true`; otherwise: `false` |
 
-Colors are off by default. `OTEL_COLORIZE` explicitly enables or disables them
-and takes precedence over `NO_COLOR`. Without `OTEL_COLORIZE`, colors remain off,
-including when `NO_COLOR` is present. Setting `config.colorize` in an initializer
+Colors are on by default in Rails development and off in production, test, and
+standalone Ruby. `OTEL_COLORIZE` explicitly enables or disables them
+and takes precedence over `NO_COLOR`. Without `OTEL_COLORIZE`, `NO_COLOR` disables colors in every environment. Setting `config.colorize` in an initializer
 overrides these environment defaults.
 
 ## Loading Rails explicitly

@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Enable colors by default in Rails development; keep them disabled elsewhere,
+  with configuration and environment overrides preserved.
+
 - Replace `silence_default_logs` and `OTEL_SILENCE_DEFAULTS` with `rails_logs`
   and `OTEL_RAILS_LOGS`, using `:replace` (default) or `:preserve`.
 - `:replace` suppresses duplicate Rails subscribers only during active gem

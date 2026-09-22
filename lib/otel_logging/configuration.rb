@@ -5,8 +5,9 @@ module OtelLogging
     VALID_OUTPUT_MODES = [:live, :delayed, :both, :live_delayed_on_error].freeze
     VALID_RAILS_LOG_MODES = [:replace, :preserve].freeze
 
-    attr_accessor :service_name, :service_version, :enable_active_record, :colorize,
+    attr_accessor :service_name, :service_version, :enable_active_record,
                   :tracer_provider
+    attr_writer :colorize
     attr_reader :theme
 
     # ActionController settings
@@ -49,6 +50,13 @@ module OtelLogging
       @partial_max_depth = env_int('OTEL_VIEW_PARTIAL_DEPTH', nil)
       @view_allowlist = nil
       @view_denylist = nil
+    end
+
+    def colorize
+      return @colorize unless @colorize.nil?
+
+      # Resolve lazily so loading the core before Rails preserves Rails defaults.
+      !!(defined?(::Rails) && ::Rails.respond_to?(:env) && ::Rails.env.development?)
     end
 
     # Convenience method to check if any ActionView logging is enabled
@@ -157,13 +165,7 @@ module OtelLogging
       # No colors if NO_COLOR is set (standard)
       return false if ENV['NO_COLOR']
 
-      # Check if TERM supports colors
-      term = ENV['TERM']
-      return false if term.nil? || term == 'dumb'
-
-      # The core gem has no Rails dependency. Applications can opt in with
-      # OTEL_COLORIZE when they know their output supports ANSI colours.
-      false
+      nil
     end
   end
 

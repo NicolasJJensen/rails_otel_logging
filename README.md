@@ -134,7 +134,7 @@ end
 | `rails_logs` | `:replace` | Use `:preserve` to retain Rails' original subscribers during traces. |
 | `service_name` | `'rails_app'` | Identify your service in the managed provider's resource. |
 | `service_version` | `'1.0.0'` | Identify your service version. |
-| `colorize` | `false` | Enable ANSI colors. |
+| `colorize` | `true` in Rails development; `false` otherwise | Enable ANSI colors. |
 
 See the [configuration reference](docs/configuration.md) for instrumentation
 switches, view filtering, environment variables, and custom providers.
