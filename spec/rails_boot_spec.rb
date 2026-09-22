@@ -73,6 +73,7 @@ RSpec.describe "automatic Rails integration" do
         config.secret_key_base = "test" * 32
         config.hosts.clear
         config.logger = LOGGER
+        config.log_tags = [:request_id]
         config.action_dispatch.show_exceptions = :none
         FileUtils.mkdir_p(File.join(config.root, "app/views/probe"))
         File.write(File.join(config.root, "app/views/probe/index.html.erb"), "<p>base view</p>")
@@ -81,7 +82,7 @@ RSpec.describe "automatic Rails integration" do
 
       class ProbeController < ActionController::Base
         def index
-          LOGGER.info("outside.request")
+          Rails.logger.info("outside.request")
           ActiveSupport::Notifications.instrument("sql.active_record", sql: "SELECT * FROM widgets", name: "Widget Load") {}
           render :index
         end
@@ -89,7 +90,7 @@ RSpec.describe "automatic Rails integration" do
 
       class ProbeApiController < ActionController::API
         def index
-          LOGGER.info("outside.api_request")
+          Rails.logger.info("outside.api_request")
           render plain: "api"
         end
       end
@@ -129,12 +130,14 @@ RSpec.describe "automatic Rails integration" do
       ActiveSupport::Notifications.subscribe("request.action_dispatch") { request_finishes += 1 }
       require "active_record/railtie"
       ActiveRecord::Base
+      ActiveRecord::Base.logger = Rails.logger
       LOGGER.info("outside.before_request")
       base = Rack::MockRequest.new(app).get("/probe", "HTTP_HOST" => "localhost")
       api = Rack::MockRequest.new(app).get("/api/probe", "HTTP_HOST" => "localhost")
       OtelLogging.logger.with_trace("outside.sql") do
         ActiveSupport::Notifications.instrument("sql.active_record", sql: "SELECT * FROM outside_widgets", name: "Outside Load") {}
       end
+      ActiveSupport::Notifications.instrument("sql.active_record", sql: "SELECT * FROM untraced_widgets", name: "Untraced Load") {}
       provider = OtelLogging.tracer_provider
       original_shutdown = provider.method(:shutdown)
       original_force_flush = provider.method(:force_flush)
@@ -147,7 +150,13 @@ RSpec.describe "automatic Rails integration" do
         original_shutdown.call(timeout: timeout)
       end
       LOGGER.info("outside.after_request")
-      spans = EXPORTER.spans.map { |span| { name: span.name, attributes: span.attributes } }
+      spans = EXPORTER.spans.map do |span|
+        {
+          name: span.name,
+          attributes: span.attributes,
+          events: (span.events || []).map { |event| { name: event.name, attributes: event.attributes } }
+        }
+      end
 
     RUBY
 
@@ -171,6 +180,8 @@ RSpec.describe "automatic Rails integration" do
     expect(result["logs"]).not_to include("Started GET", "Processing by", "Completed 200")
     expect(result["logs"].scan("db.select.outside_widgets").length).to eq(1)
     expect(result["logs"].scan("db.select.widgets").length).to eq(1)
+    expect(result["logs"].scan("Untraced Load").length).to eq(1)
+    expect(result["logs"]).not_to include("db.select.untraced_widgets")
   end
 
   it "uses an explicit provider returned by a lambda without taking ownership" do
@@ -183,6 +194,9 @@ RSpec.describe "automatic Rails integration" do
     expect(result["spans"].map { |span| span["name"] }).to include(
       "GET probe#index", "GET probe_api#index", "probe#index", "probe_api#index", "render probe/index.html.erb"
     )
+    request_event = result["spans"].flat_map { |span| span["events"] }.find { |event| event["name"] == "outside.request" }
+    expect(request_event["attributes"]["log.tags"]).to be_an(Array)
+    expect(request_event["attributes"]["log.tags"]).not_to be_empty
   end
 
   it "accepts an already-created explicit provider" do

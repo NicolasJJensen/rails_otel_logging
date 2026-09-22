@@ -30,6 +30,7 @@ module OtelLogging
       end
 
       def handle_sql_event(event)
+        return unless TraceContext.current.active?
         return if should_ignore?(event)
 
         payload = event.payload

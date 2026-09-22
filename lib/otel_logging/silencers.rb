@@ -73,8 +73,19 @@ module OtelLogging
     module RackLoggerMethods
       private
 
+      def compute_tags(request)
+        tags = super
+        root = OtelLogging::TraceContext.current.root_span
+        if root
+          output = OtelLogging::Output.for(Rails.logger)
+          output.tagged(*tags) { root.set_attribute('log.tags', output.tags) }
+        end
+        tags
+      end
+
       def started_request_message(request)
-        return nil if OtelLogging::Silencers.replace_logs?(:rack)
+        # Keep Rack's request lifecycle while omitting its redundant log entry.
+        return OtelLogging::Output::SUPPRESSED if OtelLogging::Silencers.replace_logs?(:rack)
 
         super
       end

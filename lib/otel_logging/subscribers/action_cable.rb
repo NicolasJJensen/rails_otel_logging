@@ -42,6 +42,8 @@ module OtelLogging
       end
 
       def handle_perform_action(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         channel_class = payload[:channel_class]
         action = payload[:action]
@@ -66,6 +68,8 @@ module OtelLogging
       end
 
       def handle_transmit(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         channel_class = payload[:channel_class]
         data = payload[:data]
@@ -87,6 +91,8 @@ module OtelLogging
       end
 
       def handle_broadcast(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         broadcasting = payload[:broadcasting]
         message = payload[:message]
@@ -108,6 +114,8 @@ module OtelLogging
       end
 
       def handle_subscription_confirmation(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         channel_class = payload[:channel_class]
         identifier = payload[:identifier]
@@ -123,6 +131,8 @@ module OtelLogging
       end
 
       def handle_subscription_rejection(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         channel_class = payload[:channel_class]
         identifier = payload[:identifier]

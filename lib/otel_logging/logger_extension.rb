@@ -2,6 +2,32 @@
 
 module OtelLogging
   module LoggerExtension
+    [:debug, :info, :warn, :error, :fatal, :unknown].each do |name|
+      define_method(name) do |progname = nil, &block|
+        add(::Logger::Severity.const_get(name.to_s.upcase), nil, progname, &block)
+      end
+    end
+
+    def add(severity, message = nil, progname = nil, &block)
+      severity = Output.severity(severity)
+      output = Output.for(self)
+      return output.add(severity, message, progname, &block) unless TraceContext.current.active?
+      return true unless output.enabled?(severity)
+
+      if message.nil?
+        if block
+          message = block.call
+        else
+          message = progname || self.progname
+          progname = nil
+        end
+      end
+      return true if message.equal?(Output::SUPPRESSED)
+
+      capture_log(severity, message, progname: progname)
+    end
+    alias_method :log, :add
+
     # Start a trace (root span) - typically used in middleware
     #
     # @param name [String] The trace/root span name (e.g., "GET /users/42")
@@ -16,7 +42,7 @@ module OtelLogging
     #
     def with_trace(name, attributes: {}, &block)
       context = TraceContext.current
-      span = context.start_trace(name, attributes: attributes)
+      span = context.start_trace(name, attributes: attributes.merge('log.tags' => Output.for(self).tags))
       error = nil
 
       begin
@@ -51,7 +77,7 @@ module OtelLogging
         return yield nil
       end
 
-      span = context.start_span(name, attributes: attributes)
+      span = context.start_span(name, attributes: attributes.merge('log.tags' => Output.for(self).tags))
       error = nil
 
       begin
@@ -75,27 +101,8 @@ module OtelLogging
     #     db_statement: 'SELECT * FROM users WHERE id = $1'
     #   )
     #
-    def event(name, **attributes)
-      context = TraceContext.current
-      return unless context.active?
-
-      span = context.current_span
-      return unless span
-
-      # Convert symbol keys to strings (OTel requires string keys)
-      string_attributes = attributes.transform_keys(&:to_s)
-
-      # Add event to OTel span
-      span.add_event(name, attributes: string_attributes)
-
-      # Notify live exporter (if configured)
-      # Wrapped in rescue to prevent logging errors from affecting application flow
-      begin
-        OtelLogging.notify_event(name, string_attributes, context)
-      rescue StandardError => e
-        # Silently ignore - logging should never break the application
-        debug { "OtelLogging event notification failed: #{e.message}" } rescue nil
-      end
+    def event(name, severity: :info, **attributes)
+      capture_log(Output.severity(severity), name, attributes: attributes)
     end
 
     # Get current trace ID (useful for logging correlation)
@@ -106,6 +113,48 @@ module OtelLogging
     # Get current span ID
     def current_span_id
       TraceContext.current.span_id
+    end
+
+    private
+
+    def capture_log(severity, message, attributes: {}, progname: nil)
+      output = Output.for(self)
+      return true unless output.enabled?(severity)
+
+      name = case message
+             when String then message.dup
+             when Exception then "#{message.message} (#{message.class})\n#{Array(message.backtrace).join("\n")}"
+             else message.inspect
+             end
+      tags = output.tags
+      context = TraceContext.current
+      span = OpenTelemetry::Trace.current_span
+      unless context.active? && span.recording?
+        details = attributes.empty? ? name : "#{name} #{attributes.inspect}"
+        return output.write(details, severity: severity, tags: tags, progname: progname)
+      end
+
+      metadata = attributes.transform_keys(&:to_s).merge('log.severity' => severity, 'log.tags' => tags)
+      metadata['log.progname'] = progname.to_s.dup if progname
+      span.add_event(name, attributes: metadata)
+      OtelLogging.notify_event(name, metadata, context)
+      true
+    end
+  end
+
+  module BroadcastTags
+    def tagged(*tags, &block)
+      return super if defined?(ActiveSupport::TaggedLogging) && singleton_class.ancestors.include?(ActiveSupport::TaggedLogging)
+
+      if block
+        Output.for(self).tagged(*tags) { block.call(self) }
+      else
+        copy = clone
+        copy.broadcasts.replace(broadcasts.map do |sink|
+          sink.respond_to?(:tagged) ? sink.tagged(*tags) : sink.clone
+        end)
+        copy
+      end
     end
   end
 end

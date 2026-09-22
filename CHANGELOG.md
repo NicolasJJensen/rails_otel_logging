@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add automatic Rails Railtie integration, optional install generator, lazy
-  component hooks, and Base/API controller helpers.
+  component hooks, and automatic controller helpers for Base/API applications.
 - Add managed private Rails SDK provider defaults and explicit
   `config.tracer_provider` instance or lambda support.
+- Capture standard logger calls and named `event` calls as span events during
+  traces, with normal logger fallback outside traces.
 
 ### Changed
 
@@ -20,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `OTEL_RAILS_LOGS`, using `:replace` (default) or `:preserve`.
 - `:replace` suppresses duplicate Rails subscribers only during active gem
   traces, preserving logs outside those traces.
+- Hybrid output replays a completed tree for actual failures and `ERROR` or
+  `FATAL` events; event severity alone does not mark a span or request failed.
+- Apply logger level filtering before evaluating lazy blocks and retain tagged
+  snapshots in delayed trees.
 
 ### Fixed
 

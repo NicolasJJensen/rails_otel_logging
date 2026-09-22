@@ -27,9 +27,21 @@ the gem's processors to the supplied provider without replacing it or taking ove
 its lifecycle. No compatibility aliases are retained for the former
 `silence_default_logs` setting or `OTEL_SILENCE_DEFAULTS` variable.
 
-Validation: 78 examples pass on the local Ruby 3.3 / Rails 8.0 bundle. Fresh
-Rails processes verify automatic boot, Base/API controllers, view spans, lazy SQL
-logging, replacement/preservation, request cleanup, and managed/external provider
-lifecycle. The gem builds with the Railtie and generator included, and the
-packaged core loads without Rails. The broader compatibility matrix remains a
-CI check.
+Standard `debug`, `info`, `warn`, `error`, `fatal`, `add`, and `log` calls become
+span events during an active trace and use normal logger output outside one.
+`event(name, severity:, **attributes)` follows the same capture and fallback
+rules. Logger thresholds are checked before lazy blocks run. Tagged logging uses
+snapshots for both block and chained forms, including delayed output. At WARN,
+warn/error events and the tree headings needed for structure remain while
+debug/info event content is filtered. `ERROR` and `FATAL` events request the
+hybrid live plus completed replay but do not mark the span or request failed;
+actual failures still receive the `ERROR` badge. Raw `puts`, `print`, `p`, and
+`warn` to STDERR remain untouched. Exporters write through the logger's original
+`add` method to avoid recursion and accidental duplicates.
+
+Validation: the full suite passes with 103 examples on the default Rails 8.0
+bundle, Rails 8.1, and the OpenTelemetry SDK 1.0 bundle. Rails 7.0 also has no
+failures, with four expected skips for BroadcastLogger, introduced in Rails 7.1.
+The built gem was extracted and loaded independently without Rails; a standard
+logger message appeared exactly once in delayed output. The diff whitespace
+check passes.

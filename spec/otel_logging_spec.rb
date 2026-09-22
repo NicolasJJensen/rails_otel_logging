@@ -256,7 +256,7 @@ RSpec.describe OtelLogging do
         end
       end
 
-      it 'does nothing when no active trace' do
+      it 'accepts an event when no trace is active' do
         expect { logger.event('orphan.event') }.not_to raise_error
       end
     end

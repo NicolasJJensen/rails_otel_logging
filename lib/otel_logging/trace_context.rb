@@ -132,7 +132,7 @@ module OtelLogging
 
     # Get current span
     def current_span
-      @span_stack.last
+      OpenTelemetry::Trace.current_span if active?
     end
 
     # Get root span

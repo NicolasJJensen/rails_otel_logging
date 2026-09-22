@@ -15,7 +15,9 @@ module OtelLogging
             raise ArgumentError, 'OtelLogging is already installed with a different logger or tracer provider'
           end
 
-          logger.extend(LoggerExtension) unless logger.respond_to?(:with_trace)
+          Output.for(logger)
+          logger.extend(LoggerExtension) unless logger.singleton_class.ancestors.include?(LoggerExtension)
+          logger.extend(BroadcastTags) if logger.respond_to?(:broadcasts)
           processors = build_processors(logger)
           processors.each { |processor| tracer_provider.add_span_processor(processor) }
           OtelLogging.send(:set_installation, logger: logger, tracer_provider: tracer_provider, processors: processors)

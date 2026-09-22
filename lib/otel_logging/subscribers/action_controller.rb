@@ -61,6 +61,8 @@ module OtelLogging
       end
 
       def handle_start_processing(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
 
         controller = payload[:controller]
@@ -97,6 +99,7 @@ module OtelLogging
       def handle_process_action(event)
         # Clear params at end of request
         self.class.clear_params
+        return unless TraceContext.current.active?
 
         payload = event.payload
 
@@ -113,6 +116,8 @@ module OtelLogging
       end
 
       def handle_redirect(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         location = payload[:location]
         status = payload[:status]
@@ -124,6 +129,8 @@ module OtelLogging
       end
 
       def handle_halted_callback(event)
+        return unless TraceContext.current.active?
+
         payload = event.payload
         filter = payload[:filter]
 

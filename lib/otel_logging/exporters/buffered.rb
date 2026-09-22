@@ -25,7 +25,7 @@ module OtelLogging
       def initialize(logger, only_on_error: false)
         raise ArgumentError, 'logger is required' if logger.nil?
 
-        @logger = logger
+        @output = OtelLogging::Output.for(logger)
         @only_on_error = only_on_error
         @traces = {}  # trace_id => { spans: [], root: nil, started_at: Time }
         @mutex = Mutex.new
@@ -89,14 +89,16 @@ module OtelLogging
         root = trace_data[:root]
 
         spans = trace_data[:spans]
-        return if @only_on_error && spans.none? { |span| span_has_error_details?(span) }
+        return if @only_on_error && !trace_has_error?(spans)
 
         # Build tree structure
         tree = build_tree(spans, root)
 
         # Output trace header
-        @logger.info ""
-        @logger.info "#{c(:trace_label, 'trace')} #{c(:trace_id, trace_id[0..15])}"
+        root_tags, root_progname = span_metadata(root)
+        root_severity = node_output_severity(tree)
+        emit "", severity: root_severity, tags: root_tags, progname: root_progname
+        emit "#{c(:trace_label, 'trace')} #{c(:trace_id, trace_id[0..15])}", severity: root_severity, tags: root_tags, progname: root_progname
 
         # Output root span inline (no tree prefix - root is special)
         output_root_node(tree)
@@ -104,8 +106,10 @@ module OtelLogging
 
       def output_root_node(node)
         span = node[:span]
-        children = node[:children]
-        events = span.events || []
+        children = node[:children].select { |child| node_visible?(child) }
+        events = (span.events || []).select { |event| visible_event?(event) }
+        root_severity = node_output_severity(node)
+        root_tags, root_progname = span_metadata(span)
 
         # Combine events and child spans as "tree children"
         tree_children = []
@@ -130,12 +134,12 @@ module OtelLogging
         line += " #{c(:span_id, span_id_short)}"
         line += " #{c(:duration, "#{duration_ms}ms")}"
         line += " #{c(:error_badge, 'ERROR')}" if has_error
-        @logger.info line
+        emit line, severity: root_severity, tags: root_tags, progname: root_progname
 
         # Output root attributes (simple prefix: │ if has children, nothing otherwise)
-        if span.attributes&.any?
+        if @output.enabled?(span_severity(span)) && visible_attributes(span.attributes).any?
           content_prefix = tree_children.any? ? '│ ' : '  '
-          output_attributes(span.attributes, content_prefix)
+          output_attributes(span.attributes, content_prefix, severity: span_severity(span), tags: root_tags, progname: root_progname)
         end
 
         # Output tree children - they get [] for ancestor_continues (root doesn't count)
@@ -180,10 +184,43 @@ module OtelLogging
         span_map[root_id]
       end
 
+      def visible_event?(event)
+        @output.enabled?(event_severity(event))
+      end
+
+      def trace_has_error?(spans)
+        spans.any? do |span|
+          span_has_error_details?(span) ||
+            (span.events || []).any? do |event|
+              raw_exception_event?(event) || [Logger::ERROR, Logger::FATAL].include?(event_severity(event))
+            end
+        end
+      end
+
+      def node_output_severity(node)
+        severities = []
+        own = span_severity(node[:span])
+        severities << own if @output.enabled?(own)
+        (node[:span].events || []).each do |event|
+          severity = event_severity(event)
+          severities << severity if visible_event?(event)
+        end
+        node[:children].each do |child|
+          severities << node_output_severity(child) if node_visible?(child)
+        end
+        severities.max || own
+      end
+
+      def node_visible?(node)
+        @output.enabled?(span_severity(node[:span])) ||
+          (node[:span].events || []).any? { |event| visible_event?(event) } ||
+          node[:children].any? { |child| node_visible?(child) }
+      end
+
       def output_node(node, ancestor_continues, is_last)
         span = node[:span]
-        children = node[:children]
-        events = span.events || []
+        children = node[:children].select { |child| node_visible?(child) }
+        events = (span.events || []).select { |event| visible_event?(event) }
 
         # Combine events and child spans as "tree children"
         tree_children = []
@@ -211,11 +248,15 @@ module OtelLogging
         line += " #{c(:span_id, span_id_short)}"
         line += " #{c(:duration, "#{duration_ms}ms")}"
         line += " #{c(:error_badge, 'ERROR')}" if has_error
-        @logger.info line
+        severity = node_output_severity(node)
+        tags, progname = span_metadata(span)
+        emit line, severity: severity, tags: tags, progname: progname
 
         # Output span attributes
         content_prefix = build_content_prefix(ancestor_continues, is_last, has_children)
-        output_attributes(span.attributes, content_prefix) if span.attributes&.any?
+        if @output.enabled?(span_severity(span)) && visible_attributes(span.attributes).any?
+          output_attributes(span.attributes, content_prefix, severity: span_severity(span), tags: tags, progname: progname)
+        end
 
         # Output tree children
         tree_children.each_with_index do |child, index|
@@ -232,28 +273,32 @@ module OtelLogging
 
       def output_event(event, ancestor_continues, is_last)
         prefix = build_branch_prefix(ancestor_continues, is_last)
-        event_color = event_color_for(event.name)
+        return unless visible_event?(event)
 
-        line = "#{c(:tree, prefix)}#{c(event_color, "#{EVENT_MARKER} #{event.name}")}"
-        @logger.info line
+        severity = event_severity(event)
+        event_color = event_color_for(event.name, severity: severity)
+        tags, progname = event_metadata(event)
+
+        line = "#{c(:tree, prefix)}#{c(event_color, "#{EVENT_MARKER} #{event_label(event.name, event.attributes, severity)}#{event.name}")}"
+        emit line, severity: severity, tags: tags, progname: progname
 
         # Event attributes - align under the event name (past the + marker)
-        if event.attributes&.any?
+        if visible_attributes(event.attributes).any?
           content_prefix = ''
           ancestor_continues.each { |c| content_prefix += c ? '│ ' : '  ' }
           content_prefix += is_last ? '    ' : '│   ' # 4 chars to skip past "└ + " or "├ + "
-          output_attributes(event.attributes, content_prefix)
+          output_attributes(event.attributes, content_prefix, severity: severity, tags: tags, progname: progname)
         end
       end
 
-      def output_attributes(attributes, prefix)
-        return if attributes.nil? || attributes.empty?
+      def output_attributes(attributes, prefix, severity:, tags:, progname:)
+        return if visible_attributes(attributes).empty?
 
-        attributes.each do |key, value|
+        visible_attributes(attributes).each do |key, value|
           formatted = format_value(value)
-          @logger.info "#{c(:tree, prefix)}#{c(:attribute_key, key)}#{c(:punctuation, ':')} #{c(:attribute_value, formatted)}"
+          emit "#{c(:tree, prefix)}#{c(:attribute_key, key)}#{c(:punctuation, ':')} #{c(:attribute_value, formatted)}", severity: severity, tags: tags, progname: progname
         end
-        @logger.info c(:tree, prefix)
+        emit c(:tree, prefix), severity: severity, tags: tags, progname: progname
       end
 
       def build_branch_prefix(ancestor_continues, is_last)

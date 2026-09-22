@@ -92,7 +92,7 @@ RSpec.describe 'installed output processors', uninstalled: true do
         end
 
         expect(otel_output.string).to include('exception', 'temporary failure')
-        expect(otel_output.string).not_to include('ERROR', 'RESCUED')
+        expect(otel_output.string.lines.grep(/◆ /).join).not_to include('ERROR', 'RESCUED')
         expect(child.status.code).to eq(OpenTelemetry::Trace::Status::OK)
         if mode == :live_delayed_on_error
           expect(otel_output.string.lines.grep(/^trace /).size).to eq(2)

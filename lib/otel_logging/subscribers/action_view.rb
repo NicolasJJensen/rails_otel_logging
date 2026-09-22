@@ -59,6 +59,7 @@ module OtelLogging
 
           span = payload[:__otel_span]
           token = payload[:__otel_token]
+          return unless span
 
           # Log exception with full backtrace in standard format
           if payload[:exception_object]
@@ -68,8 +69,6 @@ module OtelLogging
             OtelLogging.logger.error("  Template: #{template}") if template
             OtelLogging.logger.error(e.backtrace&.join("\n"))
           end
-
-          return unless span
 
           # Add any additional attributes from the completed render
           if payload[:count]
@@ -153,7 +152,7 @@ module OtelLogging
         end
 
         def build_attributes(notification_name, payload)
-          attrs = {}
+          attrs = { 'log.tags' => Output.for(OtelLogging.logger).tags }
 
           if payload[:layout]
             attrs['view.layout'] = extract_template_name(payload[:layout])
