@@ -63,8 +63,7 @@ module OtelLogging
 
       # Called when a span ends
       def on_finish(span)
-        # Live mode already printed on start, nothing to do
-        # Could optionally print duration here, but that gets noisy
+        output_error_details(span) if span_has_error_details?(span)
 
         # Clean up depth tracking if root span
         parent_span_id_hex = span.parent_span_id.unpack1('H*')
@@ -97,6 +96,23 @@ module OtelLogging
       end
 
       private
+
+      def output_error_details(span)
+        depth = @mutex.synchronize do
+          @span_depth.dig(span.context.hex_trace_id, span.context.hex_span_id) || 0
+        end
+        badge = span_error?(span) ? 'ERROR' : 'EXCEPTION'
+        duration_ms = ((span.end_timestamp - span.start_timestamp) / 1_000_000.0).round(2)
+        @logger.info "#{c(:tree, build_prefix(depth))}#{c(:span_name, "#{SPAN_MARKER} #{span.name}")} " \
+                     "#{c(:span_id, span.context.hex_span_id[0..7])} #{c(:duration, "#{duration_ms}ms")} " \
+                     "#{c(:error_badge, badge)}"
+
+        exceptions = (span.events || []).select { |event| event.name == 'exception' }
+        exceptions.each { |event| output_event(event.name, event.attributes, depth + 1) }
+        if span_error?(span) && exceptions.empty? && !span.status.description.to_s.empty?
+          output_attributes({ 'error.message' => span.status.description }, depth)
+        end
+      end
 
       def should_cleanup?
         (Time.now - @last_cleanup) > 60

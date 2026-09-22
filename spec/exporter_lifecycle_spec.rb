@@ -42,4 +42,84 @@ RSpec.describe 'installed output processors', uninstalled: true do
     expect(OtelLogging::TraceContext.current.active?).to be false
     expect(OpenTelemetry::Trace.current_span.context.valid?).to be false
   end
+
+  [:live, :delayed, :both, :live_delayed_on_error].each do |mode|
+    context "in #{mode} mode" do
+      it 'shows a rescued child failure without marking its ancestors as failed' do
+        install_mode(mode)
+        root = child = nil
+        otel_logger.with_trace('successful.root') do |span|
+          root = span
+          otel_logger.with_span('successful.parent') do
+            begin
+              otel_logger.with_span('failed.child') do |failed_span|
+                child = failed_span
+                raise 'pricing unavailable'
+              end
+            rescue RuntimeError
+              otel_logger.event('prices.fallback_to_cache')
+            end
+          end
+        end
+
+        output = otel_output.string
+        expect(output).to include('pricing unavailable', 'prices.fallback_to_cache')
+        expect(output.lines.grep(/◆ failed.child/).last).to include('ERROR', 'ms')
+        expect(output.lines.grep(/◆ successful\./).join).not_to include('ERROR', 'RESCUED')
+        expect(child.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+        expect(root.status.code).not_to eq(OpenTelemetry::Trace::Status::ERROR)
+        if mode == :live_delayed_on_error
+          expect(output.lines.grep(/^trace /).size).to eq(2)
+          expect(output.lines.grep(/◆ successful.root/).last).to include('ms')
+        end
+        expect(OtelLogging::TraceContext.current.active?).to be false
+        expect(OpenTelemetry::Trace.current_span.context.valid?).to be false
+      end
+
+      it 'shows an explicitly recorded exception on a successful span' do
+        install_mode(mode)
+        child = nil
+        otel_logger.with_trace('successful.root') do
+          otel_logger.with_span('recovered.child') do |span|
+            child = span
+            begin
+              raise 'temporary failure'
+            rescue RuntimeError => error
+              span.record_exception(error)
+            end
+            span.status = OpenTelemetry::Trace::Status.ok
+          end
+        end
+
+        expect(otel_output.string).to include('exception', 'temporary failure')
+        expect(otel_output.string).not_to include('ERROR', 'RESCUED')
+        expect(child.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+        if mode == :live_delayed_on_error
+          expect(otel_output.string.lines.grep(/^trace /).size).to eq(2)
+        end
+      end
+
+      it 'shows an error status without an exception' do
+        install_mode(mode)
+        otel_logger.with_trace('successful.root') do
+          otel_logger.with_span('failed.child') do |span|
+            span.status = OpenTelemetry::Trace::Status.error('upstream rejected request')
+          end
+        end
+
+        expect(otel_output.string.lines.grep(/◆ failed.child/).last).to include('ERROR')
+        expect(otel_output.string.lines.grep(/◆ successful.root/).join).not_to include('ERROR')
+      end
+    end
+  end
+
+  it 'does not repeat a successful trace in hybrid mode' do
+    install_mode(:live_delayed_on_error)
+    otel_logger.with_trace('successful.root') do
+      otel_logger.with_span('successful.child') { otel_logger.event('work.done') }
+    end
+
+    expect(otel_output.string.lines.grep(/^trace /).size).to eq(1)
+    expect(otel_output.string).not_to include('ms', 'ERROR', 'EXCEPTION')
+  end
 end

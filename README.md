@@ -57,10 +57,41 @@ belong to the caller's provider.
 
 ## Output modes
 
-- `:live`: spans and events appear as work runs.
+- `:live`: spans and events appear as work runs; failed spans and recorded
+  exceptions also print their details when the span finishes.
 - `:delayed`: a complete tree, including durations, prints when the root finishes.
 - `:both`: live output plus a completed tree.
-- `:live_delayed_on_error`: live output, with a completed tree on errors (default).
+- `:live_delayed_on_error`: live output, with a completed tree when any span has
+  an error status or a recorded exception (default).
+
+Errors remain visible even when the request recovers. A failed child gets an
+`ERROR` badge without changing its parent's status. Recorded exceptions do not
+automatically mark a span as failed: live completion output uses `EXCEPTION`
+when the span contains an exception but has no error status, and completed trees
+show the exception event beneath that span. No recovery status is inferred;
+use an event such as `prices.fallback_to_cache` to explain how work continued.
+
+Exceptions that escape a `with_span` or `with_trace` block are recorded
+automatically. If you rescue inside the block, explicitly record the exception
+so it remains visible:
+
+```ruby
+logger.with_trace('refresh_prices') do
+  logger.with_span('fetch_prices') do |span|
+    begin
+      fetch_live_prices
+    rescue PricingUnavailable => error
+      span.record_exception(error)
+      logger.event('prices.fallback_to_cache')
+      load_cached_prices
+    end
+  end
+end
+```
+
+These output rules apply to recorded spans; exceptions swallowed without being
+recorded cannot be displayed. In live modes error details appear at span finish;
+completed trees appear at root finish and include durations and individual outcomes.
 
 `config.theme` customizes colors and emphasis. `NO_COLOR` disables automatic color
 selection; `OTEL_COLORIZE` explicitly overrides it.

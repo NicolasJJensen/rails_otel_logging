@@ -11,6 +11,14 @@ module OtelLogging
 
       private
 
+      def span_error?(span)
+        span.status&.code == OpenTelemetry::Trace::Status::ERROR
+      end
+
+      def span_has_error_details?(span)
+        span_error?(span) || span.events&.any? { |event| event.name == 'exception' }
+      end
+
       def theme
         OtelLogging.config.theme
       end

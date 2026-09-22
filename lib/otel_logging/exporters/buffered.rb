@@ -15,7 +15,7 @@ module OtelLogging
     # This gives us:
     #   - Accurate durations (spans are complete)
     #   - Proper └ for last siblings (we know the full tree structure)
-    #   - Error propagation visible (parent spans have error status)
+    #   - Individual span outcomes remain visible even when a parent recovers
     class Buffered < OpenTelemetry::SDK::Trace::SpanProcessor
       include Formatting
 
@@ -88,13 +88,8 @@ module OtelLogging
 
         root = trace_data[:root]
 
-        # If only_on_error mode, skip output if no error
-        if @only_on_error
-          has_error = root.status&.code == OpenTelemetry::Trace::Status::ERROR
-          return unless has_error
-        end
-
         spans = trace_data[:spans]
+        return if @only_on_error && spans.none? { |span| span_has_error_details?(span) }
 
         # Build tree structure
         tree = build_tree(spans, root)
