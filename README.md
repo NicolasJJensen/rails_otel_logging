@@ -1,22 +1,104 @@
 # rails_otel_logging
 
-Readable OpenTelemetry trace logs for Ruby, with an optional Rails integration.
+Readable OpenTelemetry trace logs for Ruby, with automatic Rails integration.
 Provides nested trace trees, timings, events, errors, and tracing methods on an injected logger.
 
-## Install
+## Rails quickstart
 
 ```ruby
 # Gemfile
 gem 'rails_otel_logging'
 ```
 
-Or run `bundle add rails_otel_logging`.
+Run `bundle install` and boot the application. When Rails defines `Rails::Railtie`,
+loading `rails_otel_logging` loads the Railtie automatically. The integration adds
+the trace middleware, logger methods, controller helpers, and available Rails
+notification subscribers. Subscribers are loaded lazily when their Rails component
+is present.
+
+If you require the core before loading Rails itself, require
+`rails_otel_logging/rails` after Rails has loaded to register the Railtie.
+
+To create an editable initializer, run:
+
+```sh
+bin/rails generate rails_otel_logging:install
+```
+
+The generated initializer is optional. Use it to set application-specific options:
+
+```ruby
+OtelLogging.configure do |config|
+  config.output_mode = :live_delayed_on_error
+  config.rails_logs = :replace
+  config.service_name = 'orders'
+  config.service_version = '1.0.0'
+end
+```
+
+Rails uses a private OpenTelemetry SDK provider by default. The gem manages that
+provider's lifecycle and builds its resource from `service_name` and
+`service_version`; it does not replace a global provider. `:replace` suppresses
+Rails' duplicate log subscribers only while a gem trace is active. Logs emitted
+outside a gem trace remain available. Set `config.rails_logs = :preserve` to keep
+the Rails subscribers active.
+
+The Rails integration automatically includes `OtelLogging::ControllerHelpers` in
+both `ActionController::Base` and `ActionController::API` applications. Action
+controllers can use its `trace_event` and `set_trace_attribute` helpers directly.
+
+```ruby
+class OrdersController < ApplicationController
+  before_action do
+    set_trace_attribute('orders.source', 'web')
+    trace_event('orders.authorized')
+  end
+end
+```
 
 Requires Ruby 3.1+, ActiveSupport 7.0 through 8.x, and OpenTelemetry SDK 1.x.
-Rails integration is tested with Rails 7.0, 7.1, 7.2, 8.0, and 8.1. The host supplies Rails components;
-requiring the core gem does not load Rails, modify its logs, or configure the SDK.
+Rails integration is tested with Rails 7.0, 7.1, 7.2, 8.0, and 8.1. The host supplies
+Rails components.
 
-## Explicit setup
+## Advanced Rails configuration
+
+`config.tracer_provider` can be an explicit provider instance or a lambda. A lambda
+is resolved after application initializers, so an application can supply an
+explicitly configured OpenTelemetry SDK provider after configuring exporters and
+processors:
+
+```ruby
+OtelLogging.configure do |config|
+  config.tracer_provider = -> { configured_sdk_provider }
+  config.rails_logs = :preserve
+end
+```
+
+The lambda must return the application's configured SDK tracer provider with its
+exporters and processors. Do not resolve the default OpenTelemetry API no-op
+provider.
+
+When an external provider is supplied, the application owns its lifecycle, including
+shutdown. The gem adds its logging processors without replacing the global provider.
+The automatic middleware and lazy subscriber hooks remain enabled.
+Configure these options in an initializer; restart the application after changing
+the provider, instrumentation switches, or output mode.
+
+`rails_logs` defaults to `:replace`. Set it to `:preserve` when Rails' original
+request, view, or SQL subscribers should continue to emit their logs during traces.
+ActionCable's application-owned connection logger remains unchanged in both modes.
+The environment variable `OTEL_RAILS_LOGS` accepts `replace` or `preserve` and is
+overridden by `OtelLogging.configure`.
+
+Available switches include `enable_active_record`, `enable_action_controller`,
+`enable_action_cable`, `enable_templates`, `enable_layouts`, `enable_partials`,
+`partial_max_depth`, `view_allowlist`, `view_denylist`, and
+`include_params_in_views`.
+
+## Standalone Ruby setup
+
+The core gem does not load Rails. Use explicit installation when integrating with a
+Ruby process without Rails:
 
 ```ruby
 require 'rails_otel_logging'
@@ -45,15 +127,9 @@ end
 provider.shutdown
 ```
 
-`OtelLogging.configure` changes settings only. `OtelLogging.install!` attaches processors to the
-provider supplied by the caller, preserving its existing processors. It does not
-call `OpenTelemetry::SDK.configure`, replace the global provider, or shut down the
-provider. An existing SDK provider can be passed directly.
-
+The application owns flushing and shutting down an explicitly supplied provider.
 Repeated installation with the same logger and provider is a no-op. A conflicting
-logger or provider raises `ArgumentError`. Configure output mode before installing;
-processor selection is fixed for that installation. Service resource attributes
-belong to the caller's provider.
+logger or provider raises `ArgumentError`.
 
 ## Output modes
 
@@ -105,7 +181,7 @@ other value as false.
 
 | Variable | Config switch | Default |
 | --- | --- | --- |
-| `OTEL_SILENCE_DEFAULTS` | `silence_default_logs` | `true` |
+| `OTEL_RAILS_LOGS` | `rails_logs` (`replace` or `preserve`) | `replace` |
 | `OTEL_ACTIVE_RECORD` | `enable_active_record` | `true` |
 | `OTEL_ACTION_CONTROLLER` | `enable_action_controller` | `true` |
 | `OTEL_ACTION_CABLE` | `enable_action_cable` | `true` |
@@ -120,48 +196,6 @@ other value as false.
 The gem turns colors on only when `OTEL_COLORIZE` is set to a true value, because
 the core gem cannot tell whether the host's output supports ANSI colors. Setting
 the standard `NO_COLOR` variable also keeps colors off.
-
-## Rails
-
-Load the adapter and install it from an application initializer, before the
-middleware stack is built:
-
-```ruby
-require 'rails_otel_logging/rails'
-
-OtelLogging.configure do |config|
-  config.output_mode = :delayed
-  config.colorize = Rails.env.development?
-  # Enabled by default. Set false to retain Rails' default log output:
-  # config.silence_default_logs = false
-end
-
-# Use the application's SDK provider configured by its own telemetry setup.
-OtelLogging::RailsIntegration.install!(
-  application: Rails.application,
-  logger: Rails.logger,
-  tracer_provider: application_tracer_provider
-)
-```
-
-The adapter instruments requests, controllers, views, ActiveRecord, and
-ActionCable when their components and configuration switches are enabled.
-Installation is safe to repeat without duplicating middleware or subscriptions.
-For controller action spans, include `OtelLogging::ControllerHelpers` in
-`ApplicationController`. Application-specific span names and events stay in the
-application.
-
-**Default Rails log suppression is on.** Opt out before installation with
-`config.silence_default_logs = false` or `OTEL_SILENCE_DEFAULTS=false`. This setting
-controls the gem's suppression of Rails defaults; it does not mute the injected
-application logger. Restart the application when changing boot-time integration
-settings.
-
-Available switches include `enable_active_record`, `enable_action_controller`,
-`enable_action_cable`, `enable_templates`, `enable_layouts`, `enable_partials`,
-`partial_max_depth`, `view_allowlist`, `view_denylist`, and `include_params_in_views`.
-Do not disable the host's view logger separately if you want the suppression
-opt-out to restore normal view logging.
 
 ## Logger API
 

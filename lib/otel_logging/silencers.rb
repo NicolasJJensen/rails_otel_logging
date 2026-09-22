@@ -2,102 +2,169 @@
 
 module OtelLogging
   module Silencers
+    module ActionControllerMethods
+      def start_processing(event)
+        return if OtelLogging::Silencers.replace_logs?(:action_controller)
+
+        super
+      end
+
+      def process_action(event)
+        return if OtelLogging::Silencers.replace_logs?(:action_controller)
+
+        super
+      end
+
+      def redirect_to(event)
+        return if OtelLogging::Silencers.replace_logs?(:action_controller)
+
+        super
+      end
+
+      def halted_callback(event)
+        return if OtelLogging::Silencers.replace_logs?(:action_controller)
+
+        super
+      end
+    end
+
+    module ActionViewMethods
+      def render_template(event)
+        return if OtelLogging::Silencers.replace_view_logs?(:template, event)
+
+        super
+      end
+
+      def render_partial(event)
+        return if OtelLogging::Silencers.replace_view_logs?(:partial, event)
+
+        super
+      end
+
+      def render_collection(event)
+        return if OtelLogging::Silencers.replace_view_logs?(:partial, event)
+
+        super
+      end
+
+      def render_layout(event)
+        return if OtelLogging::Silencers.replace_view_logs?(:layout, event)
+
+        super
+      end
+    end
+
+    module ActionViewStartMethods
+      def start(name, id, payload)
+        return if OtelLogging::Silencers.replace_view_start_logs?(name)
+
+        super
+      end
+    end
+
+    module ActiveRecordMethods
+      def sql(event)
+        return if OtelLogging::Silencers.replace_logs?(:active_record)
+
+        super
+      end
+    end
+
+    module RackLoggerMethods
+      private
+
+      def started_request_message(request)
+        return nil if OtelLogging::Silencers.replace_logs?(:rack)
+
+        super
+      end
+    end
+
     class << self
-      # Silence default Rails log subscribers to avoid duplicate logging
-      # when OTEL is handling the same events
       def silence_defaults!(config: OtelLogging.config)
         silence_action_controller! if config.enable_action_controller
-        silence_action_cable! if config.enable_action_cable
         silence_action_view! if config.enable_action_view?
         silence_active_record! if config.enable_active_record
         silence_rack_logger!
       end
 
-      # Silence ActionController's default "Processing by..." and "Completed..." logs
-      def silence_action_controller!
-        return unless defined?(ActionController::LogSubscriber)
+      def replace_logs?(component)
+        return false unless OtelLogging::TraceContext.current.active?
 
-        # Detach the default subscriber
-        ActiveSupport::LogSubscriber.log_subscribers.each do |subscriber|
-          if subscriber.is_a?(ActionController::LogSubscriber)
-            unsubscribe_patterns(subscriber, [
-              'start_processing.action_controller',
-              'process_action.action_controller',
-              'redirect_to.action_controller',
-              'halted_callback.action_controller',
-              'send_file.action_controller',
-              'send_data.action_controller'
-            ])
-          end
+        config = OtelLogging.config
+        config.rails_logs == :replace && replacement_enabled?(config, component)
+      end
+
+      def replace_view_logs?(kind, _event)
+        return false unless replace_logs?(:action_view)
+
+        config = OtelLogging.config
+        case kind
+        when :template
+          config.enable_templates
+        when :partial
+          config.enable_partials
+        when :layout
+          config.enable_layouts
+        else
+          false
         end
       end
 
-      # Silence ActionCable's default WebSocket logs
-      def silence_action_cable!
-        return unless defined?(ActionCable)
+      def replace_view_start_logs?(name)
+        return false unless replace_logs?(:action_view)
 
-        # Action Cable's connection logger is application-owned. Do not replace
-        # or mute it globally; only detach a Rails log subscriber when one is
-        # registered.
-        return unless defined?(ActiveSupport::LogSubscriber)
-
-        ActiveSupport::LogSubscriber.log_subscribers.each do |subscriber|
-          next unless subscriber.class.name.to_s.start_with?("ActionCable::")
-
-          unsubscribe_patterns(subscriber, subscriber.respond_to?(:patterns) ? subscriber.patterns : [])
-        end
-      end
-
-      # Silence ActionView's default render logs
-      def silence_action_view!
-        return unless defined?(ActionView::LogSubscriber)
-
-        ActiveSupport::LogSubscriber.log_subscribers.each do |subscriber|
-          if subscriber.is_a?(ActionView::LogSubscriber)
-            unsubscribe_patterns(subscriber, [
-              'render_template.action_view',
-              'render_partial.action_view',
-              'render_collection.action_view',
-              'render_layout.action_view'
-            ])
-          end
-        end
-      end
-
-      # Silence ActiveRecord's default SQL logs
-      def silence_active_record!
-        return unless defined?(ActiveRecord::LogSubscriber)
-
-        ActiveSupport::LogSubscriber.log_subscribers.each do |subscriber|
-          if subscriber.is_a?(ActiveRecord::LogSubscriber)
-            unsubscribe_patterns(subscriber, [
-              'sql.active_record'
-            ])
-          end
-        end
-      end
-
-      # Silence the Rack::Logger "Started GET" messages
-      def silence_rack_logger!
-        return unless defined?(Rails::Rack::Logger)
-
-        Rails::Rack::Logger.class_eval do
-          def started_request_message(*)
-            nil
-          end if instance_methods.include?(:started_request_message) || private_instance_methods.include?(:started_request_message)
+        case name
+        when 'render_template.action_view'
+          OtelLogging.config.enable_templates
+        when 'render_layout.action_view'
+          OtelLogging.config.enable_layouts
+        else
+          false
         end
       end
 
       private
 
-      def unsubscribe_patterns(subscriber, patterns)
-        patterns.each do |pattern|
-          ActiveSupport::Notifications.notifier.listeners_for(pattern).each do |listener|
-            if listener.instance_variable_get(:@delegate) == subscriber
-              ActiveSupport::Notifications.unsubscribe(listener)
-            end
-          end
+      def replacement_enabled?(config, component)
+        case component
+        when :action_controller then config.enable_action_controller
+        when :action_view then config.enable_action_view?
+        when :active_record then config.enable_active_record
+        when :rack then true
+        else false
         end
+      end
+
+      def silence_action_controller!
+        return unless defined?(ActionController::LogSubscriber)
+
+        prepend_once(ActionController::LogSubscriber, ActionControllerMethods)
+      end
+
+      def silence_action_view!
+        return unless defined?(ActionView::LogSubscriber)
+
+        prepend_once(ActionView::LogSubscriber, ActionViewMethods)
+        if defined?(ActionView::LogSubscriber::Start)
+          prepend_once(ActionView::LogSubscriber::Start, ActionViewStartMethods)
+        end
+      end
+
+      def silence_active_record!
+        return unless defined?(ActiveRecord::LogSubscriber)
+
+        prepend_once(ActiveRecord::LogSubscriber, ActiveRecordMethods)
+      end
+
+      def silence_rack_logger!
+        return unless defined?(Rails::Rack::Logger)
+
+        prepend_once(Rails::Rack::Logger, RackLoggerMethods)
+      end
+
+      def prepend_once(klass, mod)
+        klass.prepend(mod) unless klass.ancestors.include?(mod)
       end
     end
   end

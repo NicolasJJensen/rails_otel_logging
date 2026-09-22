@@ -23,33 +23,33 @@ module RailsIntegrationApplication
     private
 
     def build_and_boot(tracer_provider)
+      OtelLogging.config.tracer_provider = tracer_provider
       application = Class.new(Rails::Application) do
         config.eager_load = false
         config.secret_key_base = "x" * 64
         config.logger = LOGGER
         config.hosts.clear
-      end
+      end.instance
       Object.const_set(:OtelIntegrationController, Class.new(ActionController::Base) do
         def ok = render(plain: "ok")
       end)
       application.routes.draw { get "/", to: "otel_integration#ok" }
-      install(application, tracer_provider)
       application.initialize!
       application
     end
 
     def install(application, tracer_provider)
       OtelLogging::RailsIntegration.install!(
-        application: application, logger: LOGGER, tracer_provider: tracer_provider
+        application: application, logger: Rails.logger, tracer_provider: tracer_provider
       )
     end
   end
 end
 
-RSpec.describe OtelLogging::RailsIntegration do
+RSpec.describe OtelLogging::RailsIntegration, uninstalled: true do
   def otel_output = RailsIntegrationApplication::OUTPUT
 
-  def otel_logger = RailsIntegrationApplication::LOGGER
+  def otel_logger = Rails.logger
 
   def application = RailsIntegrationApplication.boot(tracer_provider: otel_provider)
 
@@ -61,7 +61,7 @@ RSpec.describe OtelLogging::RailsIntegration do
   it "traces a request and always clears trace context" do
     response = Rack::MockRequest.new(application).get("/")
 
-    expect(response.status).to be_between(200, 599)
+    expect(response.status).to eq(200)
     expect(OtelLogging::TraceContext.current.active?).to be(false)
     expect(OpenTelemetry::Trace.current_span).to be_a(OpenTelemetry::Trace::Span)
   end
@@ -73,11 +73,11 @@ RSpec.describe OtelLogging::RailsIntegration do
     after_second = ActiveSupport::Notifications.notifier.listeners_for("start_processing.action_controller").length
 
     expect(after_second).to eq(after_first)
-    expect(booted.instance.middleware.to_a.count { |entry| entry.klass == OtelLogging::Middleware::Trace }).to eq(1)
+    expect(booted.middleware.to_a.count { |entry| entry.klass == OtelLogging::Middleware::Trace }).to eq(1)
   end
 
   it "suppresses Rails default request logging by default" do
-    expect(OtelLogging.config.silence_default_logs).to be(true)
+    expect(OtelLogging.config.rails_logs).to eq(:replace)
 
     Rack::MockRequest.new(application).get("/")
 
@@ -87,13 +87,12 @@ RSpec.describe OtelLogging::RailsIntegration do
 
   it "does not silence Rails default logging when suppression is disabled" do
     booted = application
-    OtelLogging.config.silence_default_logs = false
-    expect(OtelLogging::Silencers).not_to receive(:silence_defaults!)
+    OtelLogging.config.rails_logs = :preserve
     OtelLogging::RailsIntegration.install!(application: booted, logger: otel_logger, tracer_provider: otel_provider)
 
     Rack::MockRequest.new(booted).get("/")
 
     expect(otel_output.string).to include("trace ")
-    expect(OtelLogging.config.silence_default_logs).to be(false)
+    expect(OtelLogging.config.rails_logs).to eq(:preserve)
   end
 end

@@ -2,8 +2,6 @@
 
 require "active_support"
 require "active_support/notifications"
-require "action_controller"
-require "action_dispatch"
 
 require "otel_logging/logger_extension"
 require "otel_logging/controller_helpers"
@@ -16,27 +14,41 @@ require "otel_logging/subscribers/action_cable"
 
 module OtelLogging
   module RailsIntegration
-    SUBSCRIBERS = [
-      ["OtelLogging::Subscribers::ActionController", :enable_action_controller],
-      ["OtelLogging::Subscribers::ActionView", :enable_action_view?],
-      ["OtelLogging::Subscribers::ActiveRecord", :enable_active_record],
-      ["OtelLogging::Subscribers::ActionCable", :enable_action_cable]
-    ].freeze
-
     class << self
-      def install!(application:, logger:, tracer_provider:)
-        OtelLogging.install!(logger: logger, tracer_provider: tracer_provider)
-        inject_logger!(logger)
+      def install!(application:, logger: Rails.logger, tracer_provider: nil)
+        provider = tracer_provider || configured_provider
+        unless provider.respond_to?(:add_span_processor) && provider.respond_to?(:tracer)
+          raise ArgumentError, 'tracer_provider must resolve to an SDK tracer provider'
+        end
+        OtelLogging.install!(logger: logger, tracer_provider: provider)
         install_middleware!(application)
-        install_subscribers!
-        silence_defaults! if OtelLogging.config.silence_default_logs
+        install_load_hooks!
+        Silencers.silence_defaults!
         application
       end
 
       private
 
-      def inject_logger!(logger)
-        logger.extend(OtelLogging::LoggerExtension) unless logger.respond_to?(:with_trace)
+      def configured_provider
+        provider = OtelLogging.config.tracer_provider
+        return provider.call if provider.respond_to?(:call)
+        return provider unless provider.nil?
+
+        @managed_provider ||= begin
+          resource = OpenTelemetry::SDK::Resources::Resource.create(
+            'service.name' => OtelLogging.config.service_name,
+            'service.version' => OtelLogging.config.service_version
+          )
+          owned_provider = OpenTelemetry::SDK::Trace::TracerProvider.new(resource: resource)
+          at_exit do
+            begin
+              owned_provider.force_flush
+            ensure
+              owned_provider.shutdown
+            end
+          end
+          owned_provider
+        end
       end
 
       def install_middleware!(application)
@@ -47,37 +59,39 @@ module OtelLogging
         @middleware_applications << application
       end
 
-      def install_subscribers!
-        SUBSCRIBERS.each do |name, setting|
-          next unless subscriber_available?(name)
-          next if subscriber_installed?(name)
-          next if setting && !setting_enabled?(setting)
+      def install_load_hooks!
+        return if @load_hooks_installed
 
-          subscriber = Object.const_get(name)
-          subscriber.subscribe!
-          @installed_subscribers ||= {}
-          @installed_subscribers[name] = true
+        [:action_controller_base, :action_controller_api].each do |hook|
+          ActiveSupport.on_load(hook) do
+            if OtelLogging.config.enable_action_controller
+              include OtelLogging::ControllerHelpers unless ancestors.include?(OtelLogging::ControllerHelpers)
+              OtelLogging::RailsIntegration.send(:subscribe!, OtelLogging::Subscribers::ActionController)
+            end
+            OtelLogging::Silencers.silence_defaults!
+          end
         end
+        {
+          action_view: [Subscribers::ActionView, :enable_action_view?],
+          active_record: [Subscribers::ActiveRecord, :enable_active_record],
+          action_cable: [Subscribers::ActionCable, :enable_action_cable]
+        }.each do |hook, (subscriber, setting)|
+          ActiveSupport.on_load(hook) do
+            if OtelLogging.config.public_send(setting)
+              OtelLogging::RailsIntegration.send(:subscribe!, subscriber)
+            end
+            OtelLogging::Silencers.silence_defaults!
+          end
+        end
+        @load_hooks_installed = true
       end
 
-      def subscriber_available?(name)
-        name.split("::").reject(&:empty?).reduce(Object) { |scope, part| scope.const_get(part) }
-        true
-      rescue NameError
-        false
-      end
+      def subscribe!(subscriber)
+        @installed_subscribers ||= []
+        return if @installed_subscribers.include?(subscriber)
 
-      def subscriber_installed?(name)
-        @installed_subscribers && @installed_subscribers[name]
-      end
-
-      def setting_enabled?(setting)
-        value = OtelLogging.config.public_send(setting)
-        value.respond_to?(:call) ? value.call : value
-      end
-
-      def silence_defaults!
-        OtelLogging::Silencers.silence_defaults!
+        subscriber.subscribe!
+        @installed_subscribers << subscriber
       end
     end
   end

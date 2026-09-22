@@ -12,6 +12,7 @@ module OtelLogging
           subscriber = SpanSubscriber.new
 
           ActiveSupport::Notifications.subscribe('render_template.action_view', subscriber)
+          ActiveSupport::Notifications.subscribe('render_layout.action_view', subscriber)
           ActiveSupport::Notifications.subscribe('render_partial.action_view', subscriber)
           ActiveSupport::Notifications.subscribe('render_collection.action_view', subscriber)
         end
@@ -20,6 +21,8 @@ module OtelLogging
       # Subscriber that wraps rendering in spans using OTel's manual span API
       class SpanSubscriber
         def start(name, id, payload)
+          return unless TraceContext.current.active?
+
           template_name = extract_template_name(payload[:identifier])
           return unless template_name
 
@@ -73,6 +76,11 @@ module OtelLogging
             span.set_attribute('view.count', payload[:count])
           end
 
+          if payload[:exception_object]
+            span.record_exception(payload[:exception_object])
+            span.status = OpenTelemetry::Trace::Status.error(payload[:exception_object].message)
+          end
+
           span.finish
           OpenTelemetry::Context.detach(token) if token
         end
@@ -84,7 +92,7 @@ module OtelLogging
         end
 
         def tracer
-          @tracer ||= OpenTelemetry.tracer_provider.tracer('rails_otel_logging-actionview')
+          TraceContext.tracer
         end
 
         def should_log?(notification_name, payload, template_name)
@@ -92,13 +100,10 @@ module OtelLogging
           return false unless config.view_allowed?(template_name)
 
           case notification_name
+          when 'render_layout.action_view'
+            config.enable_layouts
           when 'render_template.action_view'
-            # Check if it's a layout render
-            if payload[:layout]
-              config.enable_layouts
-            else
-              config.enable_templates
-            end
+            config.enable_templates
           when 'render_partial.action_view', 'render_collection.action_view'
             return false unless config.enable_partials
 
@@ -134,6 +139,8 @@ module OtelLogging
 
         def build_span_name(notification_name, template_name)
           case notification_name
+          when 'render_layout.action_view'
+            "render layout #{template_name}"
           when 'render_template.action_view'
             "render #{template_name}"
           when 'render_partial.action_view'

@@ -7,6 +7,25 @@ RSpec.describe OtelLogging do
   describe OtelLogging::Configuration do
     subject(:config) { described_class.new }
 
+    describe '#rails_logs' do
+      it 'replaces Rails logs by default' do
+        expect(config.rails_logs).to eq(:replace)
+      end
+
+      it 'accepts preservation and rejects unknown modes' do
+        config.rails_logs = :preserve
+        expect(config.rails_logs).to eq(:preserve)
+        expect { config.rails_logs = :silent }.to raise_error(ArgumentError, /Invalid rails_logs/)
+      end
+
+      it 'reads the environment and allows explicit configuration to override it' do
+        allow(ENV).to receive(:fetch).with('OTEL_RAILS_LOGS', 'replace').and_return('preserve')
+        expect(config.rails_logs).to eq(:preserve)
+        config.rails_logs = :replace
+        expect(config.rails_logs).to eq(:replace)
+      end
+    end
+
     describe '#output_mode' do
       it 'defaults to :live_delayed_on_error' do
         expect(config.output_mode).to eq(:live_delayed_on_error)

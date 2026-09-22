@@ -2,6 +2,7 @@
 
 require 'spec_helper'
 require 'opentelemetry/sdk/trace/export/in_memory_span_exporter'
+require 'otel_logging/rails'
 
 RSpec.describe 'provider ownership', uninstalled: true do
   it 'does not configure the SDK or install processors when configuring settings' do
@@ -34,5 +35,23 @@ RSpec.describe 'provider ownership', uninstalled: true do
     expect(otel_provider).not_to receive(:shutdown)
     OtelLogging.install!(logger: otel_logger, tracer_provider: otel_provider)
     otel_logger.with_trace('request') { :ok }
+  end
+
+  it 'rejects a provider callback that returns nil instead of silently creating a provider' do
+    OtelLogging.config.tracer_provider = -> { nil }
+
+    expect {
+      OtelLogging::RailsIntegration.install!(application: double('application'), logger: otel_logger)
+    }.to raise_error(ArgumentError, /SDK tracer provider/)
+    expect(OtelLogging.tracer_provider).to be_nil
+  end
+
+  it 'rejects the API no-op provider for Rails logging' do
+    OtelLogging.config.tracer_provider = OpenTelemetry::Trace::TracerProvider.new
+
+    expect {
+      OtelLogging::RailsIntegration.install!(application: double('application'), logger: otel_logger)
+    }.to raise_error(ArgumentError, /SDK tracer provider/)
+    expect(OtelLogging.tracer_provider).to be_nil
   end
 end

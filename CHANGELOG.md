@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add automatic Rails Railtie integration, optional install generator, lazy
+  component hooks, and Base/API controller helpers.
+- Add managed private Rails SDK provider defaults and explicit
+  `config.tracer_provider` instance or lambda support.
+
+### Changed
+
+- Replace `silence_default_logs` and `OTEL_SILENCE_DEFAULTS` with `rails_logs`
+  and `OTEL_RAILS_LOGS`, using `:replace` (default) or `:preserve`.
+- `:replace` suppresses duplicate Rails subscribers only during active gem
+  traces, preserving logs outside those traces.
+
 ### Fixed
 
 - Show completed error traces for failed child spans and recorded exceptions,

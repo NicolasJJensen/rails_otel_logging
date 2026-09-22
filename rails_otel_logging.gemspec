@@ -10,9 +10,10 @@ Gem::Specification.new do |spec|
   spec.summary = "Readable OpenTelemetry trace logs with Rails integration"
   spec.description = "Prints OpenTelemetry spans as an indented tree with timings, events, and errors, " \
                      "either live or as one block when the root span closes. Adds with_trace, with_span, " \
-                     "and event to a logger the caller supplies. The optional Rails adapter instruments " \
+                     "and event to a logger. Automatic Rails integration instruments " \
                      "requests, controllers, views, Active Record, and Action Cable, and can silence the " \
-                     "matching Rails default logs. The application keeps ownership of its tracer provider."
+                     "matching Rails default logs during traces. Rails gets a managed provider by default; " \
+                     "applications retain ownership of explicitly supplied providers."
   spec.homepage = "https://github.com/NicolasJJensen/rails_otel_logging"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1"

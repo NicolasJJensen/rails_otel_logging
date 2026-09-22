@@ -2,3 +2,4 @@
 
 require "rails_otel_logging"
 require "otel_logging/rails"
+require "rails_otel_logging/railtie" if defined?(Rails::Railtie)

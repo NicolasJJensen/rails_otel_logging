@@ -3,9 +3,10 @@
 module OtelLogging
   class Configuration
     VALID_OUTPUT_MODES = [:live, :delayed, :both, :live_delayed_on_error].freeze
+    VALID_RAILS_LOG_MODES = [:replace, :preserve].freeze
 
     attr_accessor :service_name, :service_version, :enable_active_record, :colorize,
-                  :silence_default_logs  # Silence Rails' default logging to avoid duplicates
+                  :tracer_provider
     attr_reader :theme
 
     # ActionController settings
@@ -23,14 +24,14 @@ module OtelLogging
                   :view_allowlist,      # Array of patterns - only log matching paths
                   :view_denylist        # Array of patterns - skip matching paths
 
-    attr_reader :output_mode
+    attr_reader :output_mode, :rails_logs
 
     def initialize
       @output_mode = :live_delayed_on_error
       @service_name = 'rails_app'
       @service_version = '1.0.0'
       @enable_active_record = env_bool('OTEL_ACTIVE_RECORD', true)
-      @silence_default_logs = env_bool('OTEL_SILENCE_DEFAULTS', true)
+      self.rails_logs = ENV.fetch('OTEL_RAILS_LOGS', 'replace').to_sym
       @colorize = detect_color_support
       @theme = Theme.new
 
@@ -71,6 +72,13 @@ module OtelLogging
         raise ArgumentError, "Invalid output_mode: #{mode}. Must be one of: #{VALID_OUTPUT_MODES.join(', ')}"
       end
       @output_mode = mode
+    end
+
+    def rails_logs=(mode)
+      unless VALID_RAILS_LOG_MODES.include?(mode)
+        raise ArgumentError, "Invalid rails_logs: #{mode}. Must be one of: #{VALID_RAILS_LOG_MODES.join(', ')}"
+      end
+      @rails_logs = mode
     end
 
     def live?

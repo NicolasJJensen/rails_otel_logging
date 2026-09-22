@@ -1,29 +1,35 @@
 # RailsOtelLogging extraction
 
-The reusable implementation now lives in `../rails_otel_logging` (version 0.1.0).
-The application loads it through a local Gemfile path. The gem README documents
-standalone Ruby and optional Rails setup. The original 38 logging examples moved
-to the gem; lifecycle, ownership, installation, and Rails regressions expand its
-suite to 54 passing examples.
+The reusable implementation lives in `../rails_otel_logging` (version 0.1.0).
+Rails applications load it from the Gemfile and get the integration through the
+Railtie automatically when `Rails::Railtie` is defined. The optional
+`rails_otel_logging:install` generator writes an initializer for application-specific
+configuration.
 
-`OtelLogging.configure` only changes settings. Installation explicitly accepts a logger
-and an SDK tracer provider, preserves existing processors, and rejects conflicting
-repeat installation. Core loading does not load Rails or configure the global SDK.
-The application initializer owns its local provider and shutdown, or reuses an
-existing global SDK provider. Controller helpers use `OtelLogging::ControllerHelpers`.
+The Rails integration installs middleware, logger methods, and the single
+`OtelLogging::ControllerHelpers` module for both Base and API controllers, plus
+lazy notification hooks for the Rails components that are present.
+`OtelLogging.configure` defaults to `:live_delayed_on_error` and `rails_logs: :replace`.
+Replacement suppresses duplicate Rails subscribers only while an active gem trace
+is running; logs outside gem traces remain available. `rails_logs: :preserve` keeps
+the Rails subscribers active, and `OTEL_RAILS_LOGS=replace|preserve` selects the
+boot default.
 
-Default Rails logging suppression remains enabled. To retain Rails defaults, set
-`OTEL_SILENCE_DEFAULTS=false` before starting the application, or set
-`config.silence_default_logs = false` before installation. The separate development
-view logger override was removed so it cannot defeat this opt-out. Application
-logs remain enabled. Suppression removes framework log subscribers; it does not
-blanket-mute the ActionCable connection logger.
+Rails creates a private SDK provider by default, manages its lifecycle, and derives
+`service.name` and `service.version` from configuration. It does not replace the
+global provider. `config.tracer_provider` accepts an explicit provider instance or
+a lambda resolved after application initializers. An externally supplied provider
+and its shutdown remain application-owned.
 
-Validation: 54 gem examples pass, including two fresh Rails application boot
-checks for suppression on/off, request completion, middleware uniqueness, logger
-tag cleanup, and SQL logging. Two host integration examples verify actual gem
-loading, provider ownership, controller helpers, middleware, nested output and
-context cleanup. The built RubyGem installs and loads without Rails or replacing
-the global provider. An unintended unfiltered host suite also ran and failed;
-its browser/system failures are not treated as extraction validation. Browser
-compatibility is not established by this work.
+The standalone path remains explicit: core loading does not load Rails, and callers
+install with `OtelLogging.install!(logger:, tracer_provider:)`. Installation adds
+the gem's processors to the supplied provider without replacing it or taking over
+its lifecycle. No compatibility aliases are retained for the former
+`silence_default_logs` setting or `OTEL_SILENCE_DEFAULTS` variable.
+
+Validation: 78 examples pass on the local Ruby 3.3 / Rails 8.0 bundle. Fresh
+Rails processes verify automatic boot, Base/API controllers, view spans, lazy SQL
+logging, replacement/preservation, request cleanup, and managed/external provider
+lifecycle. The gem builds with the Railtie and generator included, and the
+packaged core loads without Rails. The broader compatibility matrix remains a
+CI check.
