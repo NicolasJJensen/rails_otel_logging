@@ -1,51 +1,105 @@
 # rails_otel_logging
 
-Readable OpenTelemetry trace logs for Ruby, with automatic Rails integration.
-Provides nested trace trees, timings, events, errors, and tracing methods on an injected logger.
+Readable Rails logs built on OpenTelemetry. Group requests, database queries,
+view rendering, and application messages into trace trees with timings and error
+details. Existing `Rails.logger.info`, `warn`, and other standard logging calls
+work automatically.
 
-## Rails quickstart
+A shortened example of a completed tree in `:delayed` mode (logger prefixes and
+request attributes omitted):
+
+```text
+trace 8c5a1d2e3f4b6079
+◆ GET /orders/123 7b93a210 24.6ms
+└ ◆ inventory.check 31d9a8c2 3.2ms
+  ├ + INFO Checking inventory
+  └ + INFO inventory.checked
+      available: true
+```
+
+## Installation
+
+Add the gem to your application's Gemfile:
 
 ```ruby
-# Gemfile
 gem 'rails_otel_logging'
 ```
 
-Run `bundle install` and boot the application. When Rails defines `Rails::Railtie`,
-loading `rails_otel_logging` loads the Railtie automatically. The integration adds
-the trace middleware, logger methods, controller helpers, and available Rails
-notification subscribers. Subscribers are loaded lazily when their Rails component
-is present.
-
-If you require the core before loading Rails itself, require
-`rails_otel_logging/rails` after Rails has loaded to register the Railtie.
-
-To create an editable initializer, run:
+Then run:
 
 ```sh
-bin/rails generate rails_otel_logging:install
+bundle install
 ```
 
-The generated initializer is optional. Use it to set application-specific options:
+Restart your application. Rails integration is automatic: requests get traces,
+available Rails components are instrumented, and application logs appear in the
+active trace. No initializer is required.
+
+By default, logs appear as work runs. If a trace contains a failure, a recorded
+exception, or an error/fatal message, a completed tree is also printed when the
+request finishes. Duplicate Rails request, view, and SQL subscriber output is
+suppressed during traces.
+
+## Usage
+
+### Existing Rails logging
+
+Continue using the standard logger methods:
 
 ```ruby
-OtelLogging.configure do |config|
-  config.output_mode = :live_delayed_on_error
-  config.rails_logs = :replace
-  config.service_name = 'orders'
-  config.service_version = '1.0.0'
+Rails.logger.info('Checking inventory')
+Rails.logger.warn('Only one item remaining')
+Rails.logger.debug { expensive_diagnostic }
+```
+
+Inside a request trace, messages become events on the current span. Outside a
+trace, they use normal logger output. Logger levels still apply, and lazy blocks
+are only evaluated when their level is enabled.
+
+### Custom spans and structured events
+
+Requests already have a trace. Add a span to measure an operation within one,
+and use `event` to attach structured details:
+
+```ruby
+Rails.logger.with_span('inventory.check') do
+  Rails.logger.info('Checking inventory')
+  Rails.logger.event('inventory.checked', available: true)
 end
 ```
 
-Rails uses a private OpenTelemetry SDK provider by default. The gem manages that
-provider's lifecycle and builds its resource from `service_name` and
-`service_version`; it does not replace a global provider. `:replace` suppresses
-Rails' duplicate log subscribers only while a gem trace is active. Logs emitted
-outside a gem trace remain available. Set `config.rails_logs = :preserve` to keep
-the Rails subscribers active.
+For work outside a request, start a trace explicitly:
 
-The Rails integration automatically includes `OtelLogging::ControllerHelpers` in
-both `ActionController::Base` and `ActionController::API` applications. Action
-controllers can use its `trace_event` and `set_trace_attribute` helpers directly.
+```ruby
+Rails.logger.with_trace('inventory.refresh') do
+  Rails.logger.with_span('inventory.fetch') do
+    Rails.logger.event('inventory.refreshed', count: 42)
+  end
+end
+```
+
+Without an active trace, `with_span` still runs its block but does not create a span.
+
+### Tagged logging
+
+Rails tags work with both block and chained logging:
+
+```ruby
+Rails.logger.tagged('order:123') do
+  Rails.logger.info('Checking inventory')
+end
+
+Rails.logger.tagged('order:123').warn('Only one item remaining')
+```
+
+Tags are saved with each message, so delayed output retains the tags from when
+the message was logged. Broadcast destinations keep their own formatters and levels.
+Raw `puts`, `print`, `p`, and `Kernel.warn` output is not captured.
+
+### Controller helpers
+
+Both standard and API controllers can add events and attributes to their current
+span without additional setup:
 
 ```ruby
 class OrdersController < ApplicationController
@@ -56,196 +110,78 @@ class OrdersController < ApplicationController
 end
 ```
 
-Requires Ruby 3.1+, ActiveSupport 7.0 through 8.x, and OpenTelemetry SDK 1.x.
-Rails integration is tested with Rails 7.0, 7.1, 7.2, 8.0, and 8.1. The host supplies
-Rails components.
+## Configuration
 
-## Advanced Rails configuration
+Optionally generate an initializer:
 
-`config.tracer_provider` can be an explicit provider instance or a lambda. A lambda
-is resolved after application initializers, so an application can supply an
-explicitly configured OpenTelemetry SDK provider after configuring exporters and
-processors:
-
-```ruby
-OtelLogging.configure do |config|
-  config.tracer_provider = -> { configured_sdk_provider }
-  config.rails_logs = :preserve
-end
+```sh
+bin/rails generate rails_otel_logging:install
 ```
 
-The lambda must return the application's configured SDK tracer provider with its
-exporters and processors. Do not resolve the default OpenTelemetry API no-op
-provider.
-
-When an external provider is supplied, the application owns its lifecycle, including
-shutdown. The gem adds its logging processors without replacing the global provider.
-Exporters write through the logger's original `add` method so their formatted
-output is not captured again.
-The automatic middleware and lazy subscriber hooks remain enabled.
-Configure these options in an initializer; restart the application after changing
-the provider, instrumentation switches, or output mode.
-
-`rails_logs` defaults to `:replace`. Set it to `:preserve` when Rails' original
-request, view, or SQL subscribers should continue to emit their logs during traces.
-ActionCable's application-owned connection logger remains unchanged in both modes.
-The environment variable `OTEL_RAILS_LOGS` accepts `replace` or `preserve` and is
-overridden by `OtelLogging.configure`.
-
-Available switches include `enable_active_record`, `enable_action_controller`,
-`enable_action_cable`, `enable_templates`, `enable_layouts`, `enable_partials`,
-`partial_max_depth`, `view_allowlist`, `view_denylist`, and
-`include_params_in_views`.
-
-## Standalone Ruby setup
-
-The core gem does not load Rails. Use explicit installation when integrating with a
-Ruby process without Rails:
+For example, to print only completed trees:
 
 ```ruby
-require 'rails_otel_logging'
-require 'logger'
-
-logger = Logger.new($stdout)
-provider = OpenTelemetry::SDK::Trace::TracerProvider.new(
-  resource: OpenTelemetry::SDK::Resources::Resource.create(
-    'service.name' => 'my_app', 'service.version' => '1.0.0'
-  )
-)
-
+# config/initializers/rails_otel_logging.rb
 OtelLogging.configure do |config|
   config.output_mode = :delayed
-  config.colorize = false
-end
-OtelLogging.install!(logger: logger, tracer_provider: provider)
-
-logger.with_trace('orders.create') do
-  logger.with_span('orders.validate') do
-    logger.event('validation.complete', valid: true)
-  end
-end
-
-# The application owns flushing and shutting down its provider.
-provider.shutdown
-```
-
-The application owns flushing and shutting down an explicitly supplied provider.
-Repeated installation with the same logger and provider is a no-op. A conflicting
-logger or provider raises `ArgumentError`.
-
-## Output modes
-
-- `:live`: spans and events appear as work runs; failed spans and recorded
-  exceptions also print their details when the span finishes.
-- `:delayed`: a complete tree, including durations, prints when the root finishes.
-- `:both`: live output plus a completed tree.
-- `:live_delayed_on_error`: live output plus a completed tree replay when the
-  trace has an actual failure, or an `ERROR`/`FATAL` log event (default).
-
-Errors remain visible even when the request recovers. A failed child gets an
-`ERROR` badge without changing its parent's status. Recorded exceptions do not
-automatically mark a span as failed: live completion output uses `EXCEPTION`
-when the span contains an exception but has no error status, and completed trees
-show the exception event beneath that span. No recovery status is inferred;
-use an event such as `prices.fallback_to_cache` to explain how work continued.
-
-An `ERROR` or `FATAL` event requests the hybrid completed tree but does not mark
-the span or request as failed. Failed spans receive the `ERROR` badge; recorded
-exceptions are shown at error severity. At a `WARN` logger threshold, warning and error events remain
-available, while debug/info event content is filtered; the tree headings needed
-to show their structure are retained.
-
-Exceptions that escape a `with_span` or `with_trace` block are recorded
-automatically. If you rescue inside the block, explicitly record the exception
-so it remains visible:
-
-```ruby
-logger.with_trace('refresh_prices') do
-  logger.with_span('fetch_prices') do |span|
-    begin
-      fetch_live_prices
-    rescue PricingUnavailable => error
-      span.record_exception(error)
-      logger.event('prices.fallback_to_cache')
-      load_cached_prices
-    end
-  end
+  config.service_name = 'orders'
 end
 ```
 
-These output rules apply to recorded spans; exceptions swallowed without being
-recorded cannot be displayed. In live modes error details appear at span finish;
-completed trees appear at root finish and include durations and individual outcomes.
-
-`config.theme` customizes colors and emphasis. `NO_COLOR` disables automatic color
-selection; `OTEL_COLORIZE` explicitly overrides it.
-
-## Environment variables
-
-Each variable sets the default for one configuration switch when the process
-starts. A later `OtelLogging.configure` block wins over the variable. Boolean
-variables read `true`, `1`, `yes`, or `on` (any letter case) as true, and every
-other value as false.
-
-| Variable | Config switch | Default |
+| Option | Default | Purpose |
 | --- | --- | --- |
-| `OTEL_RAILS_LOGS` | `rails_logs` (`replace` or `preserve`) | `replace` |
-| `OTEL_ACTIVE_RECORD` | `enable_active_record` | `true` |
-| `OTEL_ACTION_CONTROLLER` | `enable_action_controller` | `true` |
-| `OTEL_ACTION_CABLE` | `enable_action_cable` | `true` |
-| `OTEL_VIEW_TEMPLATES` | `enable_templates` | `true` |
-| `OTEL_VIEW_LAYOUTS` | `enable_layouts` | `true` |
-| `OTEL_VIEW_PARTIALS` | `enable_partials` | `true` |
-| `OTEL_VIEW_PARAMS` | `include_params_in_views` | `true` |
-| `OTEL_VIEW_PARTIAL_DEPTH` | `partial_max_depth` | unset, meaning unlimited depth |
-| `OTEL_COLORIZE` | `colorize` | unset, meaning colors stay off |
+| `output_mode` | `:live_delayed_on_error` | Control when logs and completed trees appear. |
+| `rails_logs` | `:replace` | Use `:preserve` to retain Rails' original subscribers during traces. |
+| `service_name` | `'rails_app'` | Identify your service in the managed provider's resource. |
+| `service_version` | `'1.0.0'` | Identify your service version. |
+| `colorize` | `false` | Enable ANSI colors. |
 
-`colorize` is the one exception to the table's "unset means default" reading.
-The gem turns colors on only when `OTEL_COLORIZE` is set to a true value, because
-the core gem cannot tell whether the host's output supports ANSI colors. Setting
-the standard `NO_COLOR` variable also keeps colors off.
+See the [configuration reference](docs/configuration.md) for instrumentation
+switches, view filtering, environment variables, and custom providers.
 
-## Logger API
+### Output modes
 
-- `with_trace(name, attributes: {}) { |span| ... }`: root trace with exception cleanup.
-- `with_span(name, attributes: {}) { |span| ... }`: child span inside a trace; outside
-  a trace it yields `nil` and still runs the block.
-- `debug`, `info`, `warn`, `error`, `fatal`, `add`, and `log`: standard Ruby logger
-  calls. Inside a trace they are captured as span events; outside a trace they are
-  emitted normally. Lazy blocks are checked against the logger level before they
-  are evaluated.
-- `event(name, severity: :info, **attributes)`: captures a named span event with
-  severity and attributes inside a trace, and falls back to normal logger output
-  outside a trace. `ERROR` and `FATAL` severity request the hybrid tree without
-  changing span or request failure status.
-- `tagged(*tags) { ... }` and chained tagged logging: tag values are snapshotted
-  with each message, including delayed trees, so later tag changes do not rewrite history.
-- `current_trace_id` / `current_span_id`: correlation identifiers or `nil`.
+| Mode | Output |
+| --- | --- |
+| `:live` | Spans and messages as work runs; failure and exception details at span completion. |
+| `:delayed` | One completed tree with durations when the root trace finishes. |
+| `:both` | Live output followed by a completed tree for every trace. |
+| `:live_delayed_on_error` (default) | Live output, then a completed tree if the trace contains a failure, recorded exception, or error/fatal message. |
 
-Raw `puts`, `print`, `p`, and `warn` to `STDERR` remain Ruby output and are not
-captured as span events.
+The completed tree intentionally repeats earlier messages in `:both` and in the
+default mode when an error triggers replay.
 
-Existing request logging needs no changes:
+## Errors and rescued exceptions
 
-```ruby
-Rails.logger.tagged('order:123') do
-  Rails.logger.info('Checking inventory')
-  Rails.logger.warn('Only one item remaining')
-  Rails.logger.debug { expensive_diagnostic }
-end
-```
+A failed child span remains visible even if its parent rescues the error and the
+request succeeds. Logging an error or fatal message triggers the default replay
+without marking the span or request as failed.
 
-Live mode prints each message immediately; delayed mode prints it once in the
-completed tree. Hybrid mode intentionally replays messages in the completed tree
-after an error. Broadcast destinations retain their own formatters and thresholds.
+Exceptions escaping a `with_span` or `with_trace` block are recorded automatically.
+If you rescue inside the block, call `span.record_exception(error)` to retain the
+exception details. Normal logger thresholds still apply to error output.
 
-If sampling disables span recording, messages use normal logger output instead.
-Completed trees use events retained by the SDK, so the provider's event-count and
-attribute limits still apply.
+See the [logging reference](docs/logging.md) for a rescued-exception example,
+span status rules, the complete logger API, and sampling and SDK retention limits.
 
-## Development
+## Advanced usage
 
-Clone the repository, then:
+- [Configuration and custom OpenTelemetry providers](docs/configuration.md)
+- [Logger API and error behavior](docs/logging.md)
+- [Standalone Ruby setup](docs/standalone.md)
+
+## Requirements
+
+Ruby 3.1+, ActiveSupport 7.0 through 8.x, and OpenTelemetry SDK 1.x.
+Rails integration is tested with Rails 7.0, 7.1, 7.2, 8.0, and 8.1; the application
+supplies its Rails components. Standalone Ruby use does not load Rails.
+
+## Development and contributing
+
+Bug reports and pull requests are welcome on
+[GitHub](https://github.com/NicolasJJensen/rails_otel_logging).
+
+Clone the repository, then run:
 
 ```sh
 bundle install
@@ -253,14 +189,9 @@ bundle exec rake
 gem build rails_otel_logging.gemspec
 ```
 
-`bundle exec rake` runs the RSpec suite. It needs no host application, no
-database, and no browser. The Rails adapter specs boot one Rails application per
-process and exercise its middleware and request logging directly.
-
-## Contributing
-
-Bug reports and pull requests are welcome on GitHub at https://github.com/NicolasJJensen/rails_otel_logging.
+The test suite needs no host application, database, or browser. Rails integration
+specs boot isolated applications to exercise middleware and request logging.
 
 ## License
 
-The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
+Available under the [MIT License](LICENSE.txt).

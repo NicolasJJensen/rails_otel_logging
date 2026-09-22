@@ -23,7 +23,8 @@ Gem::Specification.new do |spec|
     "bug_tracker_uri" => "#{spec.homepage}/issues"
   }
   spec.files = Dir.chdir(__dir__) do
-    Dir["lib/**/*.rb", "README.md", "CHANGELOG.md", "LICENSE.txt"]
+    Dir["lib/**/*.rb", "README.md", "CHANGELOG.md", "LICENSE.txt",
+        "docs/configuration.md", "docs/logging.md", "docs/standalone.md"]
       .select { |path| File.file?(path) }
   end
   spec.require_paths = ["lib"]
