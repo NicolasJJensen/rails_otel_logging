@@ -22,7 +22,7 @@ RSpec.describe 'provider ownership', uninstalled: true do
     OtelLogging.install!(logger: otel_logger, tracer_provider: otel_provider)
     OtelLogging.install!(logger: otel_logger, tracer_provider: otel_provider)
 
-    otel_logger.with_trace('owned.request') { otel_logger.event('owned.event') }
+    OtelLogging.with_trace('owned.request') { ActiveSupport.event_reporter.notify('owned.event') }
 
     expect(exporter.finished_spans.map(&:name)).to eq(['owned.request'])
     expect(exporter.finished_spans.first.events.map(&:name)).to include('owned.event')
@@ -34,7 +34,7 @@ RSpec.describe 'provider ownership', uninstalled: true do
   it 'keeps provider lifecycle under caller control' do
     expect(otel_provider).not_to receive(:shutdown)
     OtelLogging.install!(logger: otel_logger, tracer_provider: otel_provider)
-    otel_logger.with_trace('request') { :ok }
+    OtelLogging.with_trace('request') { :ok }
   end
 
   it 'rejects a provider callback that returns nil instead of silently creating a provider' do

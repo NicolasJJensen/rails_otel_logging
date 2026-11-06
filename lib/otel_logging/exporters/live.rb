@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'formatting'
+require_relative 'local_trees'
 
 module OtelLogging
   module Exporters
@@ -14,6 +15,7 @@ module OtelLogging
     # This gives real-time visibility but no durations (not known yet).
     class Live < OpenTelemetry::SDK::Trace::SpanProcessor
       include Formatting
+      include LocalTrees
 
       TRACE_TTL_SECONDS = 300 # Clean up orphaned trace depth tracking after 5 minutes
 
@@ -21,11 +23,11 @@ module OtelLogging
         raise ArgumentError, 'logger is required' if logger.nil?
 
         @output = OtelLogging::Output.for(logger)
-        @span_depth = {}  # trace_id => { span_id => depth, ... }
-        @spans = {} # trace_id => { span_id => { span:, heading_severity: } }
+        @span_depth = {}  # [trace_id, local_root_id] => { span_id => depth }
+        @spans = {} # [trace_id, local_root_id] => { span_id => { span:, heading_severity: } }
         @roots = {}
         @trace_heading_severity = {}
-        @trace_timestamps = {} # trace_id => started_at
+        @trace_timestamps = {} # [trace_id, local_root_id] => started_at
         @mutex = Mutex.new
         @last_cleanup = Time.now
       end
@@ -41,8 +43,8 @@ module OtelLogging
         depth = @mutex.synchronize do
           cleanup_orphaned_traces if should_cleanup?
 
-          # Calculate depth - check if this is a root span (no parent)
-          if parent_span_id_hex == INVALID_SPAN_ID
+          trace_id = register_tree(span)
+          if trace_id == span_key(span)
             # Root span
             @span_depth[trace_id] = { span_id => 0 }
             @spans[trace_id] = { span_id => { span: span, heading_severity: severity } }
@@ -63,9 +65,9 @@ module OtelLogging
         end
 
         # Print trace header for root spans
-        if parent_span_id_hex == INVALID_SPAN_ID
+        if depth == 0
           emit "", severity: severity, tags: tags, progname: progname
-          emit "#{c(:trace_label, 'trace')} #{c(:trace_id, trace_id[0..15])}", severity: severity, tags: tags, progname: progname
+          emit "#{c(:trace_label, 'trace')} #{c(:trace_id, span.context.hex_trace_id[0..15])}", severity: severity, tags: tags, progname: progname
         end
 
         output_span(span, depth, severity: severity, tags: tags, progname: progname)
@@ -75,17 +77,9 @@ module OtelLogging
       def on_finish(span)
         output_error_details(span) if span_has_error_details?(span)
 
-        # Clean up depth tracking if root span
-        parent_span_id_hex = span.parent_span_id.unpack1('H*')
-        if parent_span_id_hex == INVALID_SPAN_ID
-          trace_id = span.context.hex_trace_id
-          @mutex.synchronize do
-            @span_depth.delete(trace_id)
-            @spans.delete(trace_id)
-            @roots.delete(trace_id)
-            @trace_heading_severity.delete(trace_id)
-            @trace_timestamps.delete(trace_id)
-          end
+        @mutex.synchronize do
+          tree = tree_for(span)
+          delete_tree(tree) if tree && tree_finished?(span)
         end
       end
 
@@ -93,7 +87,7 @@ module OtelLogging
       def on_event(name, attributes, context)
         span = OpenTelemetry::Trace.current_span
         depth = if span
-          @mutex.synchronize { @span_depth.dig(span.context.hex_trace_id, span.context.hex_span_id) }
+          @mutex.synchronize { @span_depth.dig(tree_for(span), span.context.hex_span_id) }
         end
         depth ||= context.depth
         severity = severity_for(name, attributes)
@@ -108,6 +102,7 @@ module OtelLogging
 
       def shutdown(timeout: nil)
         @mutex.synchronize do
+          clear_trees
           @span_depth.clear
           @spans.clear
           @roots.clear
@@ -121,7 +116,7 @@ module OtelLogging
 
       def output_error_details(span)
         depth = @mutex.synchronize do
-          @span_depth.dig(span.context.hex_trace_id, span.context.hex_span_id) || 0
+          @span_depth.dig(tree_for(span), span.context.hex_span_id) || 0
         end
         badge = span_error?(span) ? 'ERROR' : 'EXCEPTION'
         duration_ms = ((span.end_timestamp - span.start_timestamp) / 1_000_000.0).round(2)
@@ -143,16 +138,19 @@ module OtelLogging
         (Time.now - @last_cleanup) > 60
       end
 
+      def delete_tree(tree)
+        @span_depth.delete(tree)
+        @spans.delete(tree)
+        @roots.delete(tree)
+        @trace_heading_severity.delete(tree)
+        @trace_timestamps.delete(tree)
+        remove_tree(tree)
+      end
+
       def cleanup_orphaned_traces
         cutoff = Time.now - TRACE_TTL_SECONDS
-        @trace_timestamps.each do |trace_id, started_at|
-          if started_at < cutoff
-            @span_depth.delete(trace_id)
-            @spans.delete(trace_id)
-            @roots.delete(trace_id)
-            @trace_heading_severity.delete(trace_id)
-            @trace_timestamps.delete(trace_id)
-          end
+        @trace_timestamps.keys.each do |tree|
+          delete_tree(tree) if @trace_timestamps[tree] < cutoff
         end
         @last_cleanup = Time.now
       end
@@ -178,7 +176,7 @@ module OtelLogging
         return unless severity >= Logger::WARN
 
         promotions = @mutex.synchronize do
-          trace_id = span.context.hex_trace_id
+          trace_id = tree_for(span)
           current = span
           result = []
           while current
@@ -205,7 +203,7 @@ module OtelLogging
 
         promotions.reverse_each do |target, previous|
           if target == :header
-            root = @roots[span.context.hex_trace_id]
+            root = @mutex.synchronize { @roots[tree_for(span)] }
             next unless root
 
             tags, progname = span_metadata(root)
@@ -214,7 +212,7 @@ module OtelLogging
             emit "#{c(:trace_label, 'trace')} #{c(:trace_id, trace_id[0..15])}", severity: severity, tags: tags, progname: progname, above: previous
           else
             tags, progname = span_metadata(target)
-            depth = @mutex.synchronize { @span_depth.dig(target.context.hex_trace_id, target.context.hex_span_id) || 0 }
+            depth = @mutex.synchronize { @span_depth.dig(tree_for(target), target.context.hex_span_id) || 0 }
             output_span_line(target, depth, severity: severity, tags: tags, progname: progname, above: previous)
           end
         end

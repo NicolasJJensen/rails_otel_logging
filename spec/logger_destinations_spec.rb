@@ -24,7 +24,7 @@ RSpec.describe 'logger destinations', uninstalled: true do
     logger = ActiveSupport::BroadcastLogger.new(first, second)
     OtelLogging.install!(logger: logger, tracer_provider: otel_provider)
 
-    logger.with_trace('request') do
+    OtelLogging.with_trace('request') do
       logger.tagged('scoped') { |tagged| tagged.info('scoped message') }
       logger.tagged('chained').info('chained message')
       expect(first_output.string).to be_empty
@@ -50,9 +50,12 @@ RSpec.describe 'logger destinations', uninstalled: true do
     OtelLogging.install!(logger: logger, tracer_provider: provider)
 
     logger.tagged('request') do
-      logger.with_trace('unsampled') do
+      OtelLogging.with_trace('unsampled') do |span|
+        expect(span).not_to be_nil
+        expect(span.recording?).to be(false)
+        expect(span.context).to be_valid
         logger.info('still visible')
-        logger.event('structured', severity: :warn, detail: 'retained')
+        ActiveSupport.event_reporter.notify('structured', detail: 'retained')
       end
     end
 
@@ -66,7 +69,7 @@ RSpec.describe 'logger destinations', uninstalled: true do
     logger = Logger.new(nil)
     OtelLogging.install!(logger: logger, tracer_provider: otel_provider)
 
-    logger.with_trace('discarded') do
+    OtelLogging.with_trace('discarded') do
       expect { logger.info { raise 'must not evaluate' } }.not_to raise_error
     end
     expect(logger).not_to respond_to(:tagged)

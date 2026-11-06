@@ -37,7 +37,7 @@ module OtelLogging
     end
 
     def add(severity, message = nil, progname = nil, &block)
-      destinations.each { |sink| original_add(sink).call(severity, message, progname, &block) }
+      uninstrumented { destinations.each { |sink| original_add(sink).call(severity, message, progname, &block) } }
       true
     end
 
@@ -48,7 +48,7 @@ module OtelLogging
         next if above && sink.level <= above
 
         sink_tags = tags.is_a?(Hash) ? tags.fetch(destination_id(sink), []) : tags
-        with_exact_tags(sink, sink_tags) { original_add(sink).call(severity, message, progname) }
+        uninstrumented { with_exact_tags(sink, sink_tags) { original_add(sink).call(severity, message, progname) } }
       end
       true
     end
@@ -72,6 +72,14 @@ module OtelLogging
     end
 
     private
+
+    def uninstrumented
+      previous = Thread.current[:otel_writing_output]
+      Thread.current[:otel_writing_output] = true
+      yield
+    ensure
+      Thread.current[:otel_writing_output] = previous
+    end
 
     def destinations(logger = @logger)
       return [logger] unless logger.respond_to?(:broadcasts)

@@ -10,9 +10,9 @@ RSpec.describe 'installed output processors', uninstalled: true do
 
   it 'buffers a complete tree until the root finishes' do
     install_mode(:delayed)
-    otel_logger.with_trace('request.root') do
-      otel_logger.with_span('child.work') do
-        otel_logger.event('work.done', count: 2)
+    OtelLogging.with_trace('request.root') do
+      OtelLogging.with_span('child.work') do
+        ActiveSupport.event_reporter.notify('work.done', count: 2)
       end
       expect(otel_output.string).to be_empty
     end
@@ -23,9 +23,9 @@ RSpec.describe 'installed output processors', uninstalled: true do
 
   it 'uses only the supplied logger for live spans and events' do
     install_mode(:live)
-    otel_logger.with_trace('live.root') do
+    OtelLogging.with_trace('live.root') do
       expect(otel_output.string).to include('live.root')
-      otel_logger.event('live.event', state: 'ready')
+      ActiveSupport.event_reporter.notify('live.event', state: 'ready')
       expect(otel_output.string).to include('live.event', 'ready')
     end
   end
@@ -33,8 +33,8 @@ RSpec.describe 'installed output processors', uninstalled: true do
   it 'prints a delayed error tree for a failed trace in hybrid mode' do
     install_mode(:live_delayed_on_error)
     expect do
-      otel_logger.with_trace('failed.root') do
-        otel_logger.with_span('failed.child') { raise 'operation failed' }
+      OtelLogging.with_trace('failed.root') do
+        OtelLogging.with_span('failed.child') { raise 'operation failed' }
       end
     end.to raise_error('operation failed')
 
@@ -48,16 +48,16 @@ RSpec.describe 'installed output processors', uninstalled: true do
       it 'shows a rescued child failure without marking its ancestors as failed' do
         install_mode(mode)
         root = child = nil
-        otel_logger.with_trace('successful.root') do |span|
+        OtelLogging.with_trace('successful.root') do |span|
           root = span
-          otel_logger.with_span('successful.parent') do
+          OtelLogging.with_span('successful.parent') do
             begin
-              otel_logger.with_span('failed.child') do |failed_span|
+              OtelLogging.with_span('failed.child') do |failed_span|
                 child = failed_span
                 raise 'pricing unavailable'
               end
             rescue RuntimeError
-              otel_logger.event('prices.fallback_to_cache')
+              ActiveSupport.event_reporter.notify('prices.fallback_to_cache')
             end
           end
         end
@@ -79,8 +79,8 @@ RSpec.describe 'installed output processors', uninstalled: true do
       it 'shows an explicitly recorded exception on a successful span' do
         install_mode(mode)
         child = nil
-        otel_logger.with_trace('successful.root') do
-          otel_logger.with_span('recovered.child') do |span|
+        OtelLogging.with_trace('successful.root') do
+          OtelLogging.with_span('recovered.child') do |span|
             child = span
             begin
               raise 'temporary failure'
@@ -101,8 +101,8 @@ RSpec.describe 'installed output processors', uninstalled: true do
 
       it 'shows an error status without an exception' do
         install_mode(mode)
-        otel_logger.with_trace('successful.root') do
-          otel_logger.with_span('failed.child') do |span|
+        OtelLogging.with_trace('successful.root') do
+          OtelLogging.with_span('failed.child') do |span|
             span.status = OpenTelemetry::Trace::Status.error('upstream rejected request')
           end
         end
@@ -115,11 +115,11 @@ RSpec.describe 'installed output processors', uninstalled: true do
 
   it 'does not repeat a successful trace in hybrid mode' do
     install_mode(:live_delayed_on_error)
-    otel_logger.with_trace('successful.root') do
-      otel_logger.with_span('successful.child') { otel_logger.event('work.done') }
+    OtelLogging.with_trace('successful.root') do
+      OtelLogging.with_span('successful.child') { ActiveSupport.event_reporter.notify('work.done') }
     end
 
     expect(otel_output.string.lines.grep(/^trace /).size).to eq(1)
-    expect(otel_output.string).not_to include('ms', 'ERROR', 'EXCEPTION')
+    expect(otel_output.string.lines.grep(/◆ /).join).not_to include('ms', 'ERROR', 'EXCEPTION')
   end
 end

@@ -83,6 +83,7 @@ RSpec.describe "automatic Rails integration" do
       class ProbeController < ActionController::Base
         def index
           Rails.logger.info("outside.request")
+          Rails.event.notify("orders.checked", order_id: 123)
           ActiveSupport::Notifications.instrument("sql.active_record", sql: "SELECT * FROM widgets", name: "Widget Load") {}
           render :index
         end
@@ -134,7 +135,7 @@ RSpec.describe "automatic Rails integration" do
       LOGGER.info("outside.before_request")
       base = Rack::MockRequest.new(app).get("/probe", "HTTP_HOST" => "localhost")
       api = Rack::MockRequest.new(app).get("/api/probe", "HTTP_HOST" => "localhost")
-      OtelLogging.logger.with_trace("outside.sql") do
+      OtelLogging.with_trace("outside.sql") do
         ActiveSupport::Notifications.instrument("sql.active_record", sql: "SELECT * FROM outside_widgets", name: "Outside Load") {}
       end
       ActiveSupport::Notifications.instrument("sql.active_record", sql: "SELECT * FROM untraced_widgets", name: "Untraced Load") {}
@@ -172,6 +173,8 @@ RSpec.describe "automatic Rails integration" do
       event_line = result["logs"].lines.find { |line| line.include?("INFO outside.request") }
       expect(event_line).not_to be_nil
       expect(event_line.include?("\e[")).to eq(environment == "development")
+      expect(result["logs"]).not_to include('INFO action_view.render_start', 'INFO action_view.render_template',
+        'INFO active_record.sql', 'INFO action_controller.request_completed')
     end
   end
 
@@ -185,12 +188,12 @@ RSpec.describe "automatic Rails integration" do
     expect(result["resource"]).to include("service.name" => "probe-service", "service.version" => "2026.09")
     expect(result["logs"]).to include("GET probe#index", "GET probe_api#index", "render probe/index.html.erb",
                                        "outside.before_request", "outside.request", "outside.api_request",
-                                       "outside.after_request")
+                                       "outside.after_request", "orders.checked")
     expect(result["logs"]).not_to include("Started GET", "Processing by", "Completed 200")
     expect(result["logs"].scan("db.select.outside_widgets").length).to eq(1)
     expect(result["logs"].scan("db.select.widgets").length).to eq(1)
-    expect(result["logs"].scan("Untraced Load").length).to eq(1)
-    expect(result["logs"]).not_to include("db.select.untraced_widgets")
+    expect(result["logs"]).not_to include("Untraced Load")
+    expect(result["logs"].scan("◆ db.select.untraced_widgets").size).to eq(1)
   end
 
   it "uses an explicit provider returned by a lambda without taking ownership" do

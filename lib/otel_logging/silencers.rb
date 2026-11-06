@@ -56,6 +56,7 @@ module OtelLogging
 
     module ActionViewStartMethods
       def start(name, id, payload)
+        OtelLogging.config.instrumentation.start_view(name, id, payload, source: :legacy_view_start)
         return if OtelLogging::Silencers.replace_view_start_logs?(name)
 
         super
@@ -64,7 +65,7 @@ module OtelLogging
 
     module ActiveRecordMethods
       def sql(event)
-        return if OtelLogging::Silencers.replace_logs?(:active_record)
+        return if OtelLogging::Silencers.replace_notification_logs?('sql.active_record', event)
 
         super
       end
@@ -106,7 +107,13 @@ module OtelLogging
         config.rails_logs == :replace && replacement_enabled?(config, component)
       end
 
-      def replace_view_logs?(kind, _event)
+      def replace_notification_logs?(name, event)
+        OtelLogging.config.rails_logs == :replace && event &&
+          Instrumentation.represented?(name, event.payload)
+      end
+
+      def replace_view_logs?(kind, event)
+        return true if event && replace_notification_logs?(event.name, event)
         return false unless replace_logs?(:action_view)
 
         config = OtelLogging.config

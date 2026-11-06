@@ -21,6 +21,12 @@ module OtelLogging
           processors = build_processors(logger)
           processors.each { |processor| tracer_provider.add_span_processor(processor) }
           OtelLogging.send(:set_installation, logger: logger, tracer_provider: tracer_provider, processors: processors)
+          OtelLogging.config.instrumentation.install!
+          if OtelLogging.config.capture_rails_events
+            subscriber = EventSubscriber.new
+            ActiveSupport.event_reporter.subscribe(subscriber)
+            OtelLogging.instance_variable_set(:@event_subscriber, subscriber)
+          end
           true
         end
       end

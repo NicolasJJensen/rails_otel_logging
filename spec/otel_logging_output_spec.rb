@@ -20,7 +20,7 @@ RSpec.describe 'OtelLogging Log Output', type: :integration do
     let(:exporter) { OtelLogging::Exporters::Live.new(test_logger) }
 
     it 'outputs trace header for root span' do
-      test_logger.with_trace('GET /users/42', attributes: { 'http.method' => 'GET' }) do |root_span|
+      OtelLogging.with_trace('GET /users/42', attributes: { 'http.method' => 'GET' }) do |root_span|
         exporter.on_start(root_span, OpenTelemetry::Context.current)
       end
 
@@ -33,13 +33,13 @@ RSpec.describe 'OtelLogging Log Output', type: :integration do
     end
 
     it 'outputs nested spans with tree structure' do
-      test_logger.with_trace('GET /users/42') do |root_span|
+      OtelLogging.with_trace('GET /users/42') do |root_span|
         exporter.on_start(root_span, OpenTelemetry::Context.current)
 
-        test_logger.with_span('users#show', attributes: { 'rails.controller' => 'users' }) do |child_span|
+        OtelLogging.with_span('users#show', attributes: { 'rails.controller' => 'users' }) do |child_span|
           exporter.on_start(child_span, OpenTelemetry::Context.current)
 
-          test_logger.with_span('render users/show.html.erb') do |view_span|
+          OtelLogging.with_span('render users/show.html.erb') do |view_span|
             exporter.on_start(view_span, OpenTelemetry::Context.current)
           end
         end
@@ -55,10 +55,10 @@ RSpec.describe 'OtelLogging Log Output', type: :integration do
     end
 
     it 'outputs events within spans' do
-      test_logger.with_trace('GET /users') do |root_span|
+      OtelLogging.with_trace('GET /users') do |root_span|
         exporter.on_start(root_span, OpenTelemetry::Context.current)
 
-        test_logger.with_span('users#index') do |action_span|
+        OtelLogging.with_span('users#index') do |action_span|
           exporter.on_start(action_span, OpenTelemetry::Context.current)
 
           # Event output via live exporter
@@ -91,14 +91,14 @@ RSpec.describe 'OtelLogging Log Output', type: :integration do
     let(:exporter) { OtelLogging::Exporters::Live.new(test_logger) }
 
     it 'shows a realistic request trace structure' do
-      test_logger.with_trace('GET /users/42', attributes: {
+      OtelLogging.with_trace('GET /users/42', attributes: {
         'http.method' => 'GET',
         'http.host' => 'localhost:3000',
         'http.target' => '/users/42'
       }) do |root_span|
         exporter.on_start(root_span, OpenTelemetry::Context.current)
 
-        test_logger.with_span('users#show', attributes: {
+        OtelLogging.with_span('users#show', attributes: {
           'rails.controller' => 'users',
           'rails.action' => 'show',
           'rails.format' => 'text/html'
@@ -119,12 +119,12 @@ RSpec.describe 'OtelLogging Log Output', type: :integration do
           }, OtelLogging::TraceContext.current)
 
           # View rendering
-          test_logger.with_span('render users/show.html.erb', attributes: {
+          OtelLogging.with_span('render users/show.html.erb', attributes: {
             'view.type' => 'template'
           }) do |view_span|
             exporter.on_start(view_span, OpenTelemetry::Context.current)
 
-            test_logger.with_span('render partial users/_header.html.erb', attributes: {
+            OtelLogging.with_span('render partial users/_header.html.erb', attributes: {
               'view.type' => 'partial'
             }) do |partial_span|
               exporter.on_start(partial_span, OpenTelemetry::Context.current)
@@ -156,10 +156,10 @@ RSpec.describe 'OtelLogging Log Output', type: :integration do
     let(:exporter) { OtelLogging::Exporters::Live.new(test_logger) }
 
     it 'highlights error events' do
-      test_logger.with_trace('POST /payments') do |root_span|
+      OtelLogging.with_trace('POST /payments') do |root_span|
         exporter.on_start(root_span, OpenTelemetry::Context.current)
 
-        test_logger.with_span('payment.process') do |process_span|
+        OtelLogging.with_span('payment.process') do |process_span|
           exporter.on_start(process_span, OpenTelemetry::Context.current)
 
           # Error event

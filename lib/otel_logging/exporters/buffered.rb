@@ -1,13 +1,12 @@
 # frozen_string_literal: true
 
 require_relative 'formatting'
+require_relative 'local_trees'
 
 module OtelLogging
   module Exporters
-    # SpanProcessor that buffers spans and outputs a complete tree when the trace finishes.
-    #
-    # Spans arrive at on_finish in completion order (deepest children first).
-    # We buffer them and reconstruct the tree when the root span finishes.
+    # Buffers each local tree until its root and already-started children finish.
+    # Remote parents do not keep a local tree open.
     #
     # Options:
     #   only_on_error: If true, only output the tree when the trace has an error
@@ -18,6 +17,7 @@ module OtelLogging
     #   - Individual span outcomes remain visible even when a parent recovers
     class Buffered < OpenTelemetry::SDK::Trace::SpanProcessor
       include Formatting
+      include LocalTrees
 
       TRACE_TTL_SECONDS = 300 # Clean up orphaned traces after 5 minutes
       MAX_BUFFERED_TRACES = 1000 # Maximum traces to buffer before forced cleanup
@@ -27,35 +27,32 @@ module OtelLogging
 
         @output = OtelLogging::Output.for(logger)
         @only_on_error = only_on_error
-        @traces = {}  # trace_id => { spans: [], root: nil, started_at: Time }
+        @traces = {}  # [trace_id, local_root_id] => { spans: [], root:, started_at: }
         @mutex = Mutex.new
         @last_cleanup = Time.now
       end
 
-      # Called when span starts - buffered mode does nothing here
       def on_start(span, parent_context)
-        # Initialize trace buffer
-        trace_id = span.context.hex_trace_id
         @mutex.synchronize do
           cleanup_orphaned_traces if should_cleanup?
-          @traces[trace_id] ||= { spans: [], root: nil, started_at: Time.now }
+          tree = register_tree(span)
+          @traces[tree] ||= { spans: [], root: span, started_at: Time.now }
         end
       end
 
-      # Called when span finishes - buffer the span
       def on_finish(span)
-        trace_id = span.context.hex_trace_id
-        parent_id = span.parent_span_id.unpack1('H*')
-
         @mutex.synchronize do
-          @traces[trace_id] ||= { spans: [], root: nil, started_at: Time.now }
-          @traces[trace_id][:spans] << span
+          tree = tree_for(span)
+          return unless tree && @traces[tree]
 
-          # Check if this is the root span
-          if parent_id == INVALID_SPAN_ID
-            @traces[trace_id][:root] = span
-            output_trace(trace_id)
-            @traces.delete(trace_id)
+          @traces[tree][:spans] << span
+          if tree_finished?(span)
+            begin
+              output_trace(tree)
+            ensure
+              @traces.delete(tree)
+              remove_tree(tree)
+            end
           end
         end
       end
@@ -66,7 +63,7 @@ module OtelLogging
       end
 
       def shutdown(timeout: nil)
-        @mutex.synchronize { @traces.clear }
+        @mutex.synchronize { @traces.clear; clear_trees }
         OpenTelemetry::SDK::Trace::Export::SUCCESS
       end
 
@@ -78,7 +75,12 @@ module OtelLogging
 
       def cleanup_orphaned_traces
         cutoff = Time.now - TRACE_TTL_SECONDS
-        @traces.delete_if { |_, data| data[:started_at] && data[:started_at] < cutoff }
+        @traces.keys.each do |tree|
+          next unless @traces[tree][:started_at] < cutoff
+
+          @traces.delete(tree)
+          remove_tree(tree)
+        end
         @last_cleanup = Time.now
       end
 
@@ -98,7 +100,7 @@ module OtelLogging
         root_tags, root_progname = span_metadata(root)
         root_severity = node_output_severity(tree)
         emit "", severity: root_severity, tags: root_tags, progname: root_progname
-        emit "#{c(:trace_label, 'trace')} #{c(:trace_id, trace_id[0..15])}", severity: root_severity, tags: root_tags, progname: root_progname
+        emit "#{c(:trace_label, 'trace')} #{c(:trace_id, root.context.hex_trace_id[0..15])}", severity: root_severity, tags: root_tags, progname: root_progname
 
         # Output root span inline (no tree prefix - root is special)
         output_root_node(tree)

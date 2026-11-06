@@ -6,7 +6,7 @@ module OtelLogging
     VALID_RAILS_LOG_MODES = [:replace, :preserve].freeze
 
     attr_accessor :service_name, :service_version, :enable_active_record,
-                  :tracer_provider
+                  :tracer_provider, :capture_rails_events
     attr_writer :colorize
     attr_reader :theme
 
@@ -28,6 +28,7 @@ module OtelLogging
     attr_reader :output_mode, :rails_logs
 
     def initialize
+      @capture_rails_events = true
       @output_mode = :live_delayed_on_error
       @service_name = 'rails_app'
       @service_version = '1.0.0'
@@ -50,6 +51,12 @@ module OtelLogging
       @partial_max_depth = env_int('OTEL_VIEW_PARTIAL_DEPTH', nil)
       @view_allowlist = nil
       @view_denylist = nil
+    end
+
+    def instrumentation(&block)
+      @instrumentation ||= Instrumentation.new
+      @instrumentation.instance_eval(&block) if block
+      @instrumentation
     end
 
     def colorize

@@ -1,163 +1,132 @@
 # frozen_string_literal: true
 
-require 'opentelemetry-sdk'
-
 module OtelLogging
-  # Thin wrapper around OpenTelemetry for managing traces and spans.
-  # Provides a simpler API while using OTel under the hood.
   class TraceContext
-    class << self
-      def current
-        Thread.current[:otel_trace_context] ||= new
+    Handle = Struct.new(:span, :token, :owner, :finished, keyword_init: true) do
+      def finish(error: nil)
+        return if finished
+        self.finished = true
+        begin
+          if error
+            span.record_exception(error)
+            span.status = OpenTelemetry::Trace::Status.error(error.message)
+          end
+          span.finish
+        ensure
+          OpenTelemetry::Context.detach(token)
+          owner.handles.delete(self)
+        end
+        span
       end
+    end
 
-      def reset!
-        Thread.current[:otel_trace_context] = nil
-      end
+    attr_reader :handles
 
-      def tracer
-        provider = OtelLogging.tracer_provider
-        raise 'OtelLogging has not been installed' unless provider
+    def self.current
+      Thread.current[:otel_trace_context] ||= new
+    end
 
-        # Resolve this on every call. Providers are application-owned and may
-        # be replaced between isolated application boots; a process-global
-        # cached tracer would silently keep using the old provider.
-        provider.tracer('rails_otel_logging', OtelLogging.config.service_version)
-      end
+    def self.reset!
+      Thread.current[:otel_trace_context] = nil
+    end
+
+    def self.tracer
+      provider = OtelLogging.tracer_provider
+      raise 'OtelLogging has not been installed' unless provider
+
+      provider.tracer('rails_otel_logging', OtelLogging.config.service_version)
     end
 
     def initialize
-      @span_stack = []
-      @root_span = nil
+      @handles = []
     end
 
-    # Start a new trace (root span)
-    def start_trace(name, attributes: {})
-      # Start root span
-      span = self.class.tracer.start_span(
-        name,
-        attributes: attributes,
-        kind: :server
-      )
-
-      @root_span = span
-      @span_stack = [span]
-
-      # Activate the span context
-      @root_token = OpenTelemetry::Context.attach(
-        OpenTelemetry::Trace.context_with_span(span)
-      )
-
-      span
+    def start_span(name, attributes: {}, parent_context: OpenTelemetry::Context.current, kind: :internal)
+      attributes = Attributes.normalize(attributes).merge('log.tags' => Output.for(OtelLogging.logger).tags)
+      span = self.class.tracer.start_span(name, attributes: attributes, with_parent: parent_context, kind: kind)
+      token = OpenTelemetry::Context.attach(OpenTelemetry::Trace.context_with_span(span, parent_context: parent_context))
+      handle = Handle.new(span: span, token: token, owner: self, finished: false)
+      @handles << handle
+      handle
     end
 
-    # End the current trace (root span)
-    def end_trace(error: nil)
-      return nil unless @root_span
-
-      if error
-        @root_span.record_exception(error)
-        @root_span.status = OpenTelemetry::Trace::Status.error(error.message)
-      end
-
-      @root_span.finish
-
-      # Detach context
-      OpenTelemetry::Context.detach(@root_token) if @root_token
-
-      span = @root_span
-      @root_span = nil
-      @root_token = nil
-      @span_stack = []
-
-      span
-    end
-
-    # Start a child span
-    def start_span(name, attributes: {})
-      span = self.class.tracer.start_span(
-        name,
-        attributes: attributes,
-        kind: :internal
-      )
-
-      @span_stack.push(span)
-      token = nil
-
-      begin
-        # Activate this span's context
-        token = OpenTelemetry::Context.attach(
-          OpenTelemetry::Trace.context_with_span(span)
-        )
-
-        # Store token for later detachment
-        span.instance_variable_set(:@_otel_context_token, token)
-      rescue StandardError
-        # If context attachment fails, detach and clean up
-        OpenTelemetry::Context.detach(token) if token
-        @span_stack.pop
-        raise
-      end
-
-      span
-    end
-
-    # End the current span
-    def end_span(error: nil)
-      return nil if @span_stack.empty? || @span_stack.length == 1 # Don't pop root
-
-      span = @span_stack.pop
-
-      if error
-        span.record_exception(error)
-        span.status = OpenTelemetry::Trace::Status.error(error.message)
-      end
-
-      span.finish
-
-      # Detach context
-      token = span.instance_variable_get(:@_otel_context_token)
-      OpenTelemetry::Context.detach(token) if token
-
-      span
-    end
-
-    # Add an event to the current span
-    def add_event(name, attributes: {})
-      span = current_span
-      return nil unless span
-
-      span.add_event(name, attributes: attributes)
-    end
-
-    # Get current span
     def current_span
-      OpenTelemetry::Trace.current_span if active?
+      OpenTelemetry::Trace.current_span
     end
 
-    # Get root span
     def root_span
-      @root_span
+      @handles.first&.span
     end
 
-    # Is there an active trace?
     def active?
-      !@root_span.nil?
+      current_span.recording?
     end
 
-    # Get trace ID
-    def trace_id
-      @root_span&.context&.hex_trace_id
-    end
-
-    # Get current span ID
-    def span_id
-      current_span&.context&.hex_span_id
-    end
-
-    # Get the depth of the current span (for tree rendering)
     def depth
-      @span_stack.length - 1
+      [@handles.size - 1, 0].max
+    end
+  end
+
+  class << self
+    UNSPECIFIED_CONTEXT = Object.new.freeze
+
+    def with_trace(name = 'trace', context: UNSPECIFIED_CONTEXT, attributes: {}, &block)
+      if context.equal?(UNSPECIFIED_CONTEXT)
+        run_span(name, attributes: attributes, parent_context: OpenTelemetry::Context.empty, &block)
+      else
+        raise ArgumentError, 'context-only with_trace does not accept a name or attributes' unless name == 'trace' && attributes.empty?
+
+        OpenTelemetry::Context.with_current(extract_context(context), &block)
+      end
+    end
+
+    def with_span(name, context: UNSPECIFIED_CONTEXT, attributes: {}, kind: :internal, &block)
+      parent = context.equal?(UNSPECIFIED_CONTEXT) ? OpenTelemetry::Context.current : extract_context(context)
+      run_span(name, attributes: attributes, parent_context: parent, kind: kind, &block)
+    end
+
+    def trace_context
+      carrier = {}
+      OpenTelemetry::Trace::Propagation::TraceContext.text_map_propagator.inject(carrier)
+      carrier
+    end
+
+    def current_trace_id
+      context = OpenTelemetry::Trace.current_span.context
+      context.hex_trace_id if context.valid?
+    end
+
+    def current_span_id
+      context = OpenTelemetry::Trace.current_span.context
+      context.hex_span_id if context.valid?
+    end
+
+    def set_span_attribute(key, value)
+      span = OpenTelemetry::Trace.current_span
+      span.add_attributes(Attributes.normalize(key => value)) if span.recording?
+    end
+
+    private
+
+    def extract_context(carrier)
+      raise ArgumentError, 'context must be a trace context Hash' unless carrier.is_a?(Hash)
+
+      OpenTelemetry::Trace::Propagation::TraceContext.text_map_propagator.extract(
+        carrier, context: OpenTelemetry::Context.empty
+      )
+    end
+
+    def run_span(name, attributes:, parent_context:, kind: :internal)
+      handle = TraceContext.current.start_span(name, attributes: attributes, parent_context: parent_context, kind: kind)
+      error = nil
+      begin
+        yield handle.span
+      rescue Exception => exception
+        error = exception
+        raise
+      ensure
+        handle.finish(error: error)
+      end
     end
   end
 end

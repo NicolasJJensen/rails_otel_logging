@@ -19,7 +19,7 @@ RSpec.describe "exporter severity output", uninstalled: true do
 
   it "replays an error event in the delayed-on-error tree" do
     logger.level = Logger::DEBUG
-    logger.with_trace("request") { logger.error("failed") }
+    OtelLogging.with_trace("request") { logger.error("failed") }
 
     expect(output.string.scan("failed").length).to eq(2)
   end
@@ -27,10 +27,10 @@ RSpec.describe "exporter severity output", uninstalled: true do
   it "keeps warning context while filtering informational events and attributes", output_mode: :delayed do
     logger.level = Logger::WARN
 
-    logger.with_trace("request", attributes: { "root.info" => "hidden" }) do
-      logger.event("info.event", severity: :info, detail: "hidden")
-      logger.with_span("operation", attributes: { "span.info" => "hidden" }) do
-        logger.event("warning", severity: :warn, detail: "visible")
+    OtelLogging.with_trace("request", attributes: { "root.info" => "hidden" }) do
+      ActiveSupport.event_reporter.notify("info.event", detail: "hidden")
+      OtelLogging.with_span("operation", attributes: { "span.info" => "hidden" }) do
+        logger.warn("warning visible")
       end
     end
 
@@ -42,9 +42,9 @@ RSpec.describe "exporter severity output", uninstalled: true do
   it "promotes live root and child headings when a warning becomes visible", output_mode: :live do
     logger.level = Logger::WARN
 
-    logger.with_trace("request", attributes: { "root.info" => "hidden" }) do
-      logger.with_span("operation", attributes: { "span.info" => "hidden" }) do
-        logger.event("warning", severity: :warn, detail: "visible")
+    OtelLogging.with_trace("request", attributes: { "root.info" => "hidden" }) do
+      OtelLogging.with_span("operation", attributes: { "span.info" => "hidden" }) do
+        logger.warn("warning visible")
       end
     end
 
@@ -68,8 +68,8 @@ RSpec.describe "exporter severity output", uninstalled: true do
     provider.add_span_processor(exporter)
     OtelLogging.live_exporter = exporter
 
-    broadcast.with_trace("request") do
-      broadcast.event("warning", severity: :warn, detail: "visible")
+    OtelLogging.with_trace("request") do
+      broadcast.warn("warning visible")
     end
 
     expect(info_output.string.scan("◆ request").length).to eq(1)
@@ -80,7 +80,7 @@ RSpec.describe "exporter severity output", uninstalled: true do
     logger.level = Logger::WARN
     tracer = provider.tracer("failure-spec")
 
-    logger.with_trace("request", attributes: { "root.info" => "hidden" }) do
+    OtelLogging.with_trace("request", attributes: { "root.info" => "hidden" }) do
       child = tracer.start_span("failed.child")
       child.record_exception(RuntimeError.new("failure detail"))
       child.status = OpenTelemetry::Trace::Status.error("failure detail")
@@ -96,7 +96,7 @@ RSpec.describe "exporter severity output", uninstalled: true do
   it "retains error and fatal events at a warning threshold", output_mode: :delayed do
     logger.level = Logger::WARN
 
-    logger.with_trace("request") do
+    OtelLogging.with_trace("request") do
       logger.error("error event")
       logger.fatal("fatal event")
     end
@@ -107,8 +107,8 @@ RSpec.describe "exporter severity output", uninstalled: true do
   it "does not treat an informational event named exception as an SDK exception" do
     logger.level = Logger::DEBUG
 
-    logger.with_trace("request") do
-      logger.event("exception", severity: :info, detail: "ordinary")
+    OtelLogging.with_trace("request") do
+      ActiveSupport.event_reporter.notify("exception", detail: "ordinary")
     end
 
     expect(output.string.scan("INFO exception").length).to eq(1)
@@ -119,7 +119,7 @@ RSpec.describe "exporter severity output", uninstalled: true do
     logger.level = Logger::DEBUG
     tracer = provider.tracer("severity-output-spec")
 
-    logger.with_trace("request") do
+    OtelLogging.with_trace("request") do
       child = tracer.start_span("sdk.child")
       token = OpenTelemetry::Context.attach(OpenTelemetry::Trace.context_with_span(child))
       begin

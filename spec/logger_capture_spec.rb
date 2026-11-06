@@ -54,7 +54,7 @@ RSpec.describe "Logger capture", uninstalled: true do
     evaluated = false
     logger.level = Logger::INFO
 
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       logger.debug { evaluated = true; "debugged" }
       logger.info("info message")
       logger.warn("warn message")
@@ -73,30 +73,30 @@ RSpec.describe "Logger capture", uninstalled: true do
 
   it "writes event and add calls normally outside a trace" do
     expect(logger.add(Logger::INFO, "outside add", "outside-prog")).to be(true)
-    logger.event("outside.event", severity: :info, answer: 42)
+    ActiveSupport.event_reporter.notify("outside.event", answer: 42)
 
     expect(output.string).to include("outside add", "outside.event")
     expect(exporter.finished_spans).to be_empty
   end
 
   it "keeps block-form progname and message semantics" do
-    logger.with_trace("capture") { logger.info("component") { "block message" } }
+    OtelLogging.with_trace("capture") { logger.info("component") { "block message" } }
 
     event = captured_events.find { |candidate| candidate.name == "block message" }
     expect(event.attributes["log.progname"]).to eq("component")
   end
 
-  it "adds explicit event severity and attributes to the current span" do
-    logger.with_trace("capture") do
-      logger.event("custom.event", severity: :warn, answer: 42)
+  it "adds structured event attributes to the current span" do
+    OtelLogging.with_trace("capture") do
+      ActiveSupport.event_reporter.notify("custom.event", answer: 42)
     end
 
     event = finished_trace.events.find { |candidate| candidate.name == "custom.event" }
-    expect(event.attributes).to include("log.severity" => Logger::WARN, "answer" => 42)
+    expect(event.attributes).to include("log.severity" => Logger::INFO, "answer" => 42)
   end
 
   it "associates logs with a manually activated OpenTelemetry child span" do
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       manual = provider.tracer("manual").start_span("manual.child")
       token = OpenTelemetry::Context.attach(OpenTelemetry::Trace.context_with_span(manual))
       logger.info("manual message")
@@ -121,7 +121,7 @@ RSpec.describe "Logger capture", uninstalled: true do
     original_stderr = $stderr
     $stdout = stdout
     $stderr = stderr
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       puts "raw stdout"
       warn "raw stderr"
     end
@@ -136,7 +136,7 @@ RSpec.describe "Logger capture", uninstalled: true do
 
   it "captures a tag snapshot for nested tagged logger clones" do
     mutable = String.new("before")
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       logger.tagged("outer") do
         logger.tagged(mutable) do
           logger.info("nested message")
@@ -153,7 +153,7 @@ RSpec.describe "Logger capture", uninstalled: true do
     single = ActiveSupport::TaggedLogging.new(Logger.new(StringIO.new))
     single.extend(OtelLogging::LoggerExtension)
 
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       clone = single.tagged("one").tagged("two")
       clone.info("chained tags")
     end
@@ -163,10 +163,10 @@ RSpec.describe "Logger capture", uninstalled: true do
   end
 
   it "keeps tags isolated across threads" do
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       logger.tagged("main") { logger.info("main message") }
       thread = Thread.new do
-        logger.with_trace("worker.trace") { logger.tagged("worker") { logger.info("worker message") } }
+        OtelLogging.with_trace("worker.trace") { logger.tagged("worker") { logger.info("worker message") } }
       end
       thread.join
     end
@@ -179,13 +179,13 @@ RSpec.describe "Logger capture", uninstalled: true do
   end
 
   it "outputs a captured event once in delayed mode" do
-    logger.with_trace("capture") { logger.info("once only") }
+    OtelLogging.with_trace("capture") { logger.info("once only") }
 
     expect(output.string.scan("once only").length).to eq(1)
   end
 
   it "replays the complete successful root in hybrid mode for error logs", hybrid: true do
-    logger.with_trace("capture") do
+    OtelLogging.with_trace("capture") do
       logger.info("before error")
       logger.error("recoverable error")
       logger.info("after error")
@@ -198,7 +198,7 @@ RSpec.describe "Logger capture", uninstalled: true do
   it "broadcasts one captured event to each destination" do
     skip "ActiveSupport::BroadcastLogger is unavailable" unless defined?(ActiveSupport::BroadcastLogger)
 
-    logger.with_trace("capture") { logger.info("broadcast once") }
+    OtelLogging.with_trace("capture") { logger.info("broadcast once") }
 
     expect(output.string.scan("broadcast once").length).to eq(1)
     expect(secondary_output.string.scan("broadcast once").length).to eq(1)

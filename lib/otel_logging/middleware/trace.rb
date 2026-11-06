@@ -14,34 +14,24 @@ module OtelLogging
         trace_name = build_trace_name(env)
         attributes = build_attributes(env, request)
 
-        logger = OtelLogging.logger
-        logger.with_trace(trace_name, attributes: attributes) do |span|
+        OtelLogging.with_span(trace_name, attributes: attributes, kind: :server,
+          context: { 'traceparent' => env['HTTP_TRACEPARENT'], 'tracestate' => env['HTTP_TRACESTATE'] }.compact) do |span|
           # Store trace info in env for access by controllers
           env['otel.trace_id'] = span.context.hex_trace_id
           env['otel.span_id'] = span.context.hex_span_id
 
-          begin
-            status, headers, response = @app.call(env)
+          status, headers, response = @app.call(env)
 
-            # Add response attributes
-            span.set_attribute('http.status_code', status)
-            update_span_name(span, env, status)
+          # Add response attributes
+          span.set_attribute('http.status_code', status)
+          update_span_name(span, env)
 
-            # Mark as error if 5xx
-            if status >= 500
-              span.status = OpenTelemetry::Trace::Status.error("HTTP #{status}")
-            end
-
-            [status, headers, response]
-          rescue StandardError => e
-            span.record_exception(e)
-            span.status = OpenTelemetry::Trace::Status.error(e.message)
-
-            # Log exception with full backtrace in standard format
-            logger.error("\n#{e.class} (#{e.message}):")
-            logger.error(e.backtrace&.join("\n"))
-            raise
+          # Mark as error if 5xx
+          if status >= 500
+            span.status = OpenTelemetry::Trace::Status.error("HTTP #{status}")
           end
+
+          [status, headers, response]
         end
       end
 
@@ -66,7 +56,7 @@ module OtelLogging
         attrs
       end
 
-      def update_span_name(span, env, status)
+      def update_span_name(span, env)
         # Update span name with controller/action if available
         if env['action_controller.instance']
           controller = env['action_controller.instance']

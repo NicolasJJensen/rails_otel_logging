@@ -2,7 +2,6 @@
 
 require "stringio"
 require "rails_otel_logging"
-require "otel_logging/subscribers/active_record"
 
 RSpec.configure do |config|
   config.expect_with(:rspec) { |expectations| expectations.include_chain_clauses_in_custom_matcher_descriptions = true }
@@ -35,6 +34,11 @@ RSpec.configure do |config|
     OtelLogging.install!(logger: otel_logger, tracer_provider: otel_provider) unless example.metadata[:uninstalled]
     example.run
   ensure
+    OtelLogging.config.instrumentation.uninstall!
+    subscriber = OtelLogging.instance_variable_get(:@event_subscriber)
+    ActiveSupport.event_reporter.unsubscribe(subscriber) if subscriber
+    Thread.current[:otel_notification_frames] = nil
+    Thread.current[:otel_notification_outcomes] = nil
     @otel_provider&.shutdown
     OtelLogging::TraceContext.reset!
     OtelLogging.instance_variables.each { |key| OtelLogging.remove_instance_variable(key) }

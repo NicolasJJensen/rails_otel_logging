@@ -4,18 +4,16 @@ require "active_support"
 require "active_support/notifications"
 
 require "otel_logging/logger_extension"
-require "otel_logging/controller_helpers"
 require "otel_logging/middleware/trace"
 require "otel_logging/silencers"
-require "otel_logging/subscribers/action_controller"
-require "otel_logging/subscribers/action_view"
-require "otel_logging/subscribers/active_record"
-require "otel_logging/subscribers/action_cable"
+require "otel_logging/framework_instrumentation"
 
 module OtelLogging
   module RailsIntegration
     class << self
       def install!(application:, logger: Rails.logger, tracer_provider: nil)
+        FrameworkInstrumentation.install_event_origin!
+        OtelLogging.config.instrumentation.enable_framework!
         provider = tracer_provider || configured_provider
         unless provider.respond_to?(:add_span_processor) && provider.respond_to?(:tracer)
           raise ArgumentError, 'tracer_provider must resolve to an SDK tracer provider'
@@ -62,36 +60,13 @@ module OtelLogging
       def install_load_hooks!
         return if @load_hooks_installed
 
-        [:action_controller_base, :action_controller_api].each do |hook|
+        [:action_controller_base, :action_controller_api, :action_view, :active_record, :action_cable].each do |hook|
           ActiveSupport.on_load(hook) do
-            if OtelLogging.config.enable_action_controller
-              include OtelLogging::ControllerHelpers unless ancestors.include?(OtelLogging::ControllerHelpers)
-              OtelLogging::RailsIntegration.send(:subscribe!, OtelLogging::Subscribers::ActionController)
-            end
-            OtelLogging::Silencers.silence_defaults!
-          end
-        end
-        {
-          action_view: [Subscribers::ActionView, :enable_action_view?],
-          active_record: [Subscribers::ActiveRecord, :enable_active_record],
-          action_cable: [Subscribers::ActionCable, :enable_action_cable]
-        }.each do |hook, (subscriber, setting)|
-          ActiveSupport.on_load(hook) do
-            if OtelLogging.config.public_send(setting)
-              OtelLogging::RailsIntegration.send(:subscribe!, subscriber)
-            end
+            OtelLogging::FrameworkInstrumentation.install_view_start! if hook == :action_view
             OtelLogging::Silencers.silence_defaults!
           end
         end
         @load_hooks_installed = true
-      end
-
-      def subscribe!(subscriber)
-        @installed_subscribers ||= []
-        return if @installed_subscribers.include?(subscriber)
-
-        subscriber.subscribe!
-        @installed_subscribers << subscriber
       end
     end
   end

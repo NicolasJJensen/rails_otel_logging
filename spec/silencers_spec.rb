@@ -30,7 +30,7 @@ RSpec.describe OtelLogging::Silencers do
   it "replaces covered framework logs only inside an active trace" do
     subscriber_class.prepend(described_class::ActionControllerMethods)
 
-    otel_logger.with_trace("request") do
+    OtelLogging.with_trace("request") do
       expect(subscriber.start_processing(nil)).to be_nil
       expect(subscriber.send_file(nil)).to eq(:delegated)
     end
