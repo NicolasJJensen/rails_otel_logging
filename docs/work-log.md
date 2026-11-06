@@ -1,47 +1,59 @@
-# RailsOtelLogging extraction
+# Rails event and instrumentation integration
 
-The reusable implementation lives in `../rails_otel_logging` (version 0.1.0).
-Rails applications load it from the Gemfile and get the integration through the
-Railtie automatically when `Rails::Railtie` is defined. The optional
-`rails_otel_logging:install` generator writes an initializer for application-specific
-configuration.
+Implemented November 6, 2026. The gem targets Ruby 3.2+ and Rails/ActiveSupport
+8.1+, with OpenTelemetry SDK 1.x. Its managed Rails provider remains private;
+applications retain ownership of explicitly supplied providers.
 
-The Rails integration installs middleware, logger methods, and the single
-`OtelLogging::ControllerHelpers` module for both Base and API controllers, plus
-lazy notification hooks for the Rails components that are present.
-`OtelLogging.configure` defaults to `:live_delayed_on_error` and `rails_logs: :replace`.
-Replacement suppresses duplicate Rails subscribers only while an active gem trace
-is running; logs outside gem traces remain available. `rails_logs: :preserve` keeps
-the Rails subscribers active, and `OTEL_RAILS_LOGS=replace|preserve` selects the
-boot default.
+Tracing and correlation methods now live on `OtelLogging`. Logger tracing methods,
+`logger.event`, and controller helpers have been removed. Standard logger methods
+and Rails tags retain their capture, fallback, severity, and destination behavior.
+Structured application events use `Rails.event.notify` or, outside Rails,
+`ActiveSupport.event_reporter.notify`.
 
-Rails creates a private SDK provider by default, manages its lifecycle, and derives
-`service.name` and `service.version` from configuration. It does not replace the
-global provider. `config.tracer_provider` accepts an explicit provider instance or
-a lambda resolved after application initializers. An externally supplied provider
-and its shutdown remain application-owned.
+```ruby
+OtelLogging.configure do |config|
+  config.instrumentation do
+    subscribe "inventory.check"
+  end
+end
 
-The standalone path remains explicit: core loading does not load Rails, and callers
-install with `OtelLogging.install!(logger:, tracer_provider:)`. Installation adds
-the gem's processors to the supplied provider without replacing it or taking over
-its lifecycle. No compatibility aliases are retained for the former
-`silence_default_logs` setting or `OTEL_SILENCE_DEFAULTS` variable.
+ActiveSupport::Notifications.instrument("inventory.check", product_id: 123) do
+  Rails.logger.info("Checking inventory")
+  Rails.event.notify("inventory.checked", available: true)
+end
+```
 
-Standard `debug`, `info`, `warn`, `error`, `fatal`, `add`, and `log` calls become
-span events during an active trace and use normal logger output outside one.
-`event(name, severity:, **attributes)` follows the same capture and fallback
-rules. Logger thresholds are checked before lazy blocks run. Tagged logging uses
-snapshots for both block and chained forms, including delayed output. At WARN,
-warn/error events and the tree headings needed for structure remain while
-debug/info event content is filtered. `ERROR` and `FATAL` events request the
-hybrid live plus completed replay but do not mark the span or request failed;
-actual failures still receive the `ERROR` badge. Raw `puts`, `print`, `p`, and
-`warn` to STDERR remain untouched. Exporters write through the logger's original
-`add` method to avoid recursion and accidental duplicates.
+Application notification rules accept exact names, regular expressions, or
+payload-aware callables. The first match wins before built-in framework mappings.
+The selected mapping is evaluated at start and completion, with shared parameter
+filtering and attribute normalization. Controller, SQL, view, and Cable spans use
+the same lifecycle infrastructure. Native Rails completion events already
+represented by recording spans are omitted from this gem's output; other event
+subscribers remain intact. Exporter output cannot recursively create notification
+spans or reporter events.
 
-Validation: the full suite passes with 103 examples on the default Rails 8.0
-bundle, Rails 8.1, and the OpenTelemetry SDK 1.0 bundle. Rails 7.0 also has no
-failures, with four expected skips for BroadcastLogger, introduced in Rails 7.1.
-The built gem was extracted and loaded independently without Rails; a standard
-logger message appeared exactly once in delayed output. The diff whitespace
-check passes.
+`with_span` always creates a span. Parameterless `with_trace` creates an independent
+root; `with_trace(context:)` activates imported context without creating a span.
+`trace_context` returns a serializable W3C hash. Context propagation is explicit in
+application code, with no job hooks. Exporters group spans by local entry span,
+flush after that root and its already-started children finish, and correlate
+separate process output using the shared trace ID.
+
+Validation on macOS with Ruby 3.3.6 and Rails 8.1.3.1:
+
+- Current SDK bundle: 122 examples, zero failures, seed 3129.
+- OpenTelemetry SDK 1.0 bundle: 122 examples, zero failures, seed 32335.
+- Rails subprocess boot coverage includes development and production, Base/API
+  controllers, multiple destinations, default-log replacement, and native events.
+- A built and extracted gem loaded without Rails. A second Ruby process consumed
+  serialized context after the originating span ended, retained the correct
+  trace/parent IDs, and printed its own completed local tree. Logger capture
+  appeared once.
+- Diff whitespace checks passed. CI covers Ruby 3.2, 3.3, and 3.4 on Rails 8.1;
+  only Ruby 3.3 was executed locally.
+
+A local diagnostic benchmark of 10,000 empty notifications per case, with delayed
+output and no output device, measured approximately 0.69 microseconds without a
+subscriber, 4.31 for unmatched dispatch, 72.86 for an exact rule creating a span,
+and 72.81 for a catch-all rule creating a span. These are single-run development
+measurements, not application performance guarantees or regression thresholds.

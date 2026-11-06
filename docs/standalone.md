@@ -22,14 +22,18 @@ OtelLogging.configure do |config|
 end
 OtelLogging.install!(logger: logger, tracer_provider: provider)
 
-logger.with_trace('orders.create') do
-  logger.with_span('orders.validate') do
-    logger.event('validation.complete', valid: true)
+OtelLogging.with_span('orders.create') do
+  OtelLogging.with_span('orders.validate') do
+    ActiveSupport.event_reporter.notify('validation.complete', valid: true)
   end
 end
 
 provider.shutdown
 ```
+
+The instrumentation DSL is also available without Rails. Use
+`ActiveSupport.event_reporter` in place of `Rails.event`. Rails framework mappings
+are enabled only by the Rails integration.
 
 The application owns flushing and shutting down an explicitly supplied provider.
 Repeated installation with the same logger and provider is a no-op. A conflicting

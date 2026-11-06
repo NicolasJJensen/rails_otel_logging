@@ -17,9 +17,10 @@ Defaults below assume no environment overrides.
 | `tracer_provider` | `nil` | Use the managed Rails provider, or supply an SDK provider instance or lambda. |
 | `colorize` | `true` in Rails development; `false` otherwise | Enable ANSI colors in output. |
 | `theme` | `OtelLogging::Theme.new` | Customize colors and emphasis through the theme object. |
-| `enable_active_record` | `true` | Capture SQL notifications. |
-| `enable_action_controller` | `true` | Capture controller notifications. |
-| `enable_action_cable` | `true` | Capture Action Cable notifications. |
+| `capture_rails_events` | `true` | Subscribe to the Rails/ActiveSupport event reporter. |
+| `enable_active_record` | `true` | Create spans for SQL operations. |
+| `enable_action_controller` | `true` | Create spans for controller actions. |
+| `enable_action_cable` | `true` | Create spans for selected Action Cable operations. |
 | `enable_templates` | `true` | Trace view templates. |
 | `enable_layouts` | `true` | Trace view layouts. |
 | `enable_partials` | `true` | Trace partial rendering. |
@@ -32,6 +33,17 @@ Defaults below assume no environment overrides.
 View lists accept regular expressions or strings. Plain strings match substrings;
 strings containing `*` use path patterns (`*` for one path segment, `**` across
 segments).
+
+## Instrumentation rules
+
+Configure [notification subscriptions](instrumentation.md) before installation.
+Application rules take precedence over built-in mappings. Component and view
+switches above control the built-in mappings; explicit application rules can
+instrument those notifications even when a built-in switch is disabled.
+
+`capture_rails_events = false` disables only this gem's event reporter subscriber;
+ordinary logger capture and notification spans remain active. Other Rails event
+subscribers are never removed.
 
 ## Colors and theme
 

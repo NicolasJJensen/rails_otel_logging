@@ -56,29 +56,45 @@ Inside a request trace, messages become events on the current span. Outside a
 trace, they use normal logger output. Logger levels still apply, and lazy blocks
 are only evaluated when their level is enabled.
 
-### Custom spans and structured events
+### Instrument operations and report events
 
-Requests already have a trace. Add a span to measure an operation within one,
-and use `event` to attach structured details:
-
-```ruby
-Rails.logger.with_span('inventory.check') do
-  Rails.logger.info('Checking inventory')
-  Rails.logger.event('inventory.checked', available: true)
-end
-```
-
-For work outside a request, start a trace explicitly:
+Register application operations in your initializer:
 
 ```ruby
-Rails.logger.with_trace('inventory.refresh') do
-  Rails.logger.with_span('inventory.fetch') do
-    Rails.logger.event('inventory.refreshed', count: 42)
+OtelLogging.configure do |config|
+  config.instrumentation do
+    subscribe "inventory.check"
   end
 end
 ```
 
-Without an active trace, `with_span` still runs its block but does not create a span.
+Use Rails notifications for timed operations, and Rails events for structured facts:
+
+```ruby
+ActiveSupport::Notifications.instrument("inventory.check", product_id: 123) do
+  Rails.logger.info("Checking inventory")
+  Rails.event.notify("inventory.checked", available: true)
+end
+```
+
+The operation becomes a span, using the notification name and filtered payload.
+Requests, controller actions, SQL, views, and selected Action Cable operations
+already have built-in instrumentation. Registered operations outside requests
+start their own traces.
+
+Direct spans are also supported without registration:
+
+```ruby
+OtelLogging.with_span("inventory.refresh") do |span|
+  span.set_attribute("inventory.source", "warehouse")
+  Rails.event.notify("inventory.refreshed", count: 42)
+end
+```
+
+`with_span` creates a child of the current span, or a root span and new trace when
+there is no parent. It always yields a span object, even when sampling disables
+recording. See the [instrumentation guide](docs/instrumentation.md) for matching
+rules, transformations, and first-match precedence.
 
 ### Tagged logging
 
@@ -96,19 +112,20 @@ Tags are saved with each message, so delayed output retains the tags from when
 the message was logged. Broadcast destinations keep their own formatters and levels.
 Raw `puts`, `print`, `p`, and `Kernel.warn` output is not captured.
 
-### Controller helpers
+### Trace metadata and propagation
 
-Both standard and API controllers can add events and attributes to their current
-span without additional setup:
+Tracing helpers belong to `OtelLogging`, not the logger:
 
 ```ruby
-class OrdersController < ApplicationController
-  before_action do
-    set_trace_attribute('orders.source', 'web')
-    trace_event('orders.authorized')
-  end
-end
+OtelLogging.set_span_attribute("order.id", order.id)
+OtelLogging.current_trace_id
+OtelLogging.current_span_id
 ```
+
+To continue work elsewhere, pass `OtelLogging.trace_context`, a serialization-ready
+hash, and consume it with `OtelLogging.with_span("name", context: context)`.
+See the [job example and trace API](docs/logging.md#continuing-a-trace-in-a-job).
+The gem does not install job hooks or change job arguments.
 
 ## Configuration
 
@@ -144,8 +161,8 @@ switches, view filtering, environment variables, and custom providers.
 | Mode | Output |
 | --- | --- |
 | `:live` | Spans and messages as work runs; failure and exception details at span completion. |
-| `:delayed` | One completed tree with durations when the root trace finishes. |
-| `:both` | Live output followed by a completed tree for every trace. |
+| `:delayed` | One completed tree with durations when the local root and its tracked children finish. |
+| `:both` | Live output followed by a completed tree for every local tree. |
 | `:live_delayed_on_error` (default) | Live output, then a completed tree if the trace contains a failure, recorded exception, or error/fatal message. |
 
 The completed tree intentionally repeats earlier messages in `:both` and in the
@@ -157,24 +174,27 @@ A failed child span remains visible even if its parent rescues the error and the
 request succeeds. Logging an error or fatal message triggers the default replay
 without marking the span or request as failed.
 
-Exceptions escaping a `with_span` or `with_trace` block are recorded automatically.
+Exceptions escaping an instrumented operation, `with_span`, or a root-creating
+`with_trace` block are recorded automatically.
 If you rescue inside the block, call `span.record_exception(error)` to retain the
 exception details. Normal logger thresholds still apply to error output.
 
 See the [logging reference](docs/logging.md) for a rescued-exception example,
-span status rules, the complete logger API, and sampling and SDK retention limits.
+span status rules, the tracing API, and sampling and SDK retention limits.
+Completed console trees contain local work; separate processes print separate
+trees correlated by trace ID.
 
 ## Advanced usage
 
 - [Configuration and custom OpenTelemetry providers](docs/configuration.md)
-- [Logger API and error behavior](docs/logging.md)
+- [Tracing, logging, and error behavior](docs/logging.md)
+- [Instrumentation DSL](docs/instrumentation.md)
 - [Standalone Ruby setup](docs/standalone.md)
 
 ## Requirements
 
-Ruby 3.1+, ActiveSupport 7.0 through 8.x, and OpenTelemetry SDK 1.x.
-Rails integration is tested with Rails 7.0, 7.1, 7.2, 8.0, and 8.1; the application
-supplies its Rails components. Standalone Ruby use does not load Rails.
+Ruby 3.2+, Rails/ActiveSupport 8.1+ (below 9.0), and OpenTelemetry SDK 1.x.
+The application supplies its Rails components. Standalone Ruby use does not load Rails.
 
 ## Development and contributing
 
